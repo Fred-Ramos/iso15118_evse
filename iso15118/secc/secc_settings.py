@@ -62,6 +62,11 @@ class Config:
         # SDP request.
         self.enforce_tls = env.bool("SECC_ENFORCE_TLS", default=False)
 
+        # INESCTEC added
+        # Disables TLS, in case the SECC doesn't have the required certificates
+        self.use_tls = env.bool("USE_TLS", default=True)
+
+
         # Indicates whether or not the ChargeService (energy transfer) is free.
         # Should be configurable via OCPP messages.
         # Must be one of the bool values True or False

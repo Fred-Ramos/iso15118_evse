@@ -399,7 +399,7 @@ class CommunicationSessionHandler:
     async def process_sdp_request(
         self, sdp_request: SDPRequest
     ) -> Union[SDPResponse, SDPResponseWireless]:
-        if self.config.enforce_tls or sdp_request.security == Security.TLS:
+        if self.config.use_tls and (self.config.enforce_tls or sdp_request.security == Security.TLS): # INESCTEC Added USE_TLS option
             await self.start_tcp_server(True)
         else:
             await self.start_tcp_server(False)
