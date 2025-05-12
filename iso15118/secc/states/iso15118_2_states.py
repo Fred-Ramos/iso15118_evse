@@ -333,7 +333,7 @@ class ServiceDiscovery(StateSECC):
                 supported_auth_options = self.comm_session.config.supported_auth_options
                 if AuthEnum.EIM in supported_auth_options:
                     auth_options.append(AuthEnum.EIM_V2)
-                if AuthEnum.PNC in supported_auth_options and self.comm_session.is_tls:
+                if AuthEnum.PNC in supported_auth_options and self.comm_session.is_tls: #TO MAKE SURE PNC ONLY WORKS WITH TLS, SOLVES SOME OF THE PREVIOUS PROBLEMS WITH ISO15118-2 2013
                     auth_options.append(AuthEnum.PNC_V2)
 
         self.comm_session.offered_auth_options = auth_options
