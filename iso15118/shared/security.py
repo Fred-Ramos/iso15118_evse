@@ -1484,9 +1484,14 @@ class CertPath(str, Enum):
     OEM_CERT_CHAIN_PEM = "oemCertChain.pem"
 
     def __get__(self, instance, owner):
-        return os.path.join(
-            str(shared_settings[SettingKey.PKI_PATH]), "iso15118_2/certs/", self.value
+        path = os.path.join(
+            str(shared_settings[SettingKey.PKI_PATH]),
+            str(shared_settings[SettingKey.PKI_PROTOCOL]),
+            "certs",
+            self.value,
         )
+        logger.debug(f"Using cert path: {path}")
+        return path
 
 
 class KeyPath(str, Enum):
@@ -1523,11 +1528,14 @@ class KeyPath(str, Enum):
     OEM_ROOT_PEM = "oemRootCA.key"
 
     def __get__(self, instance, owner):
-        return os.path.join(
+        path = os.path.join(
             str(shared_settings[SettingKey.PKI_PATH]),
-            "iso15118_2/private_keys/",
+            str(shared_settings[SettingKey.PKI_PROTOCOL]),
+            "private_keys",
             self.value,
         )
+        logger.debug(f"Using key path: {path}")
+        return path
 
 
 class KeyPasswordPath(str, Enum):
@@ -1546,8 +1554,11 @@ class KeyPasswordPath(str, Enum):
     MO_SUB_CA2_PASSWORD = "moSubCA2LeafPassword.txt"
 
     def __get__(self, instance, owner):
-        return os.path.join(
+        path = os.path.join(
             str(shared_settings[SettingKey.PKI_PATH]),
-            "iso15118_2/private_keys/",
+            str(shared_settings[SettingKey.PKI_PROTOCOL]),
+            "private_keys",
             self.value,
         )
+        logger.debug(f"Using key path: {path}")
+        return path
