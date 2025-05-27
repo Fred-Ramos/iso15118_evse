@@ -142,6 +142,7 @@ def get_ssl_context(server_side: bool) -> Optional[SSLContext]:
 
     if server_side:
         try:
+            logger.info("Getting SSL context")
             ssl_context.load_cert_chain(
                 certfile=CertPath.CPO_CERT_CHAIN_PEM,
                 keyfile=KeyPath.SECC_LEAF_PEM,
@@ -168,6 +169,9 @@ def get_ssl_context(server_side: bool) -> Optional[SSLContext]:
             # (Table 5 in V2G20 specification)
             # Marc/André - this suggests we will need mutual auth 15118-2 if
             # TLS1.3 is enabled.
+
+            logger.debug("TLS 1.3 is enabled: enforcing mutual authentication by verifying EVCC certificate chain")
+
             ssl_context.load_verify_locations(cafile=CertPath.OEM_ROOT_PEM)
             ssl_context.verify_mode = VerifyMode.CERT_REQUIRED
         else:
@@ -181,12 +185,15 @@ def get_ssl_context(server_side: bool) -> Optional[SSLContext]:
         # specification [V2G20-1856]
         # TODO: A configuration mechanism could be provided to add/remove cipher
         #  suite in case where a vulnerability is identified with any of them
-        ssl_context.set_ciphers(
+        cipher_list = (
             "TLS_AES_256_GCM_SHA384:"
             "TLS_CHACHA20_POLY1305_SHA256:"
             "ECDH-ECDSA-AES128-SHA256:"
             "ECDHE-ECDSA-AES128-SHA256"
         )
+
+        logger.debug(f"Setting TLS cipher suites to: {cipher_list}")
+        ssl_context.set_ciphers(cipher_list)
     else:
         # Load the V2G Root CA certificate(s) to validate the SECC's leaf and
         # Sub-CA CPO certificates. The cafile string is the path to a file of
@@ -228,6 +235,7 @@ def get_ssl_context(server_side: bool) -> Optional[SSLContext]:
     # The OpenSSL name for ECDH curve secp256r1 is prime256v1
     ssl_context.set_ecdh_curve("prime256v1")
 
+    logger.info("Finished: Getting SSL context")
     return ssl_context
 
 

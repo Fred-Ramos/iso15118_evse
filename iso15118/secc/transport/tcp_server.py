@@ -120,7 +120,11 @@ class TCPServer(asyncio.Protocol):
                     logger.debug(f"Retrying on {self.port}")
                     await asyncio.sleep(BACK_OFF_SECONDS)
                     continue
+        
+        loop = asyncio.get_running_loop()
+        loop.set_debug(True)
 
+        logger.debug("Attemptying to start TCP server")
         self.server = await asyncio.start_server(
             # The client_connected_cb callback, which is the __call__ method of
             # this class) is called whenever a new client connection is
