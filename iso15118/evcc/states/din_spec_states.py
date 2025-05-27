@@ -22,6 +22,7 @@ from iso15118.shared.messages.datatypes import (
     DCEVSEStatusCode,
     SelectedService,
     SelectedServiceList,
+    PVEVTargetCurrentDin,
 )
 from iso15118.shared.messages.din_spec.body import (
     CableCheckReq,
@@ -60,6 +61,7 @@ from iso15118.shared.messages.enums import (
     IsolationLevel,
     Namespace,
     Protocol,
+    UnitSymbol,
 )
 from iso15118.shared.messages.iso15118_2.msgdef import V2GMessage as V2GMessageV2
 from iso15118.shared.messages.iso15118_20.common_types import (
@@ -71,6 +73,9 @@ from iso15118.shared.states import Terminate
 
 logger = logging.getLogger(__name__)
 
+# *** EVerest code start ***
+from iso15118.evcc.everest import context as EVEREST_CTX
+# *** EVerest code end ***
 
 # ============================================================================
 # |    EVCC STATES- DIN SPEC 70121                                           |
@@ -196,22 +201,11 @@ class ServiceDiscovery(StateEVCC):
         communication session and reuse for resumed session, otherwise request
         from EV controller.
         """
-        if evcc_settings.RESUME_REQUESTED_ENERGY_MODE:
-            logger.debug(
-                "Reusing energy transfer mode "
-                f"{evcc_settings.RESUME_REQUESTED_ENERGY_MODE} "
-                "from previously paused session"
+        self.comm_session.selected_energy_mode = (
+            await self.comm_session.ev_controller.get_energy_transfer_mode(
+                Protocol.DIN_SPEC_70121
             )
-            self.comm_session.selected_energy_mode = (
-                evcc_settings.RESUME_REQUESTED_ENERGY_MODE
-            )
-            evcc_settings.RESUME_REQUESTED_ENERGY_MODE = None
-        else:
-            self.comm_session.selected_energy_mode = (
-                await self.comm_session.ev_controller.get_energy_transfer_mode(
-                    Protocol.DIN_SPEC_70121
-                )
-            )
+        )
 
     def select_auth_mode(self, auth_option_list: List[AuthEnum]):
         self.comm_session.selected_auth_option = None
@@ -383,6 +377,10 @@ class ChargeParameterDiscovery(StateEVCC):
                 charge_parameter_discovery_res.sa_schedule_list.values
             )
 
+            # EVerest code start #
+            EVEREST_CTX.publish('AC_EVPowerReady', True)
+            # EVerest code end #
+
             cable_check_req = CableCheckReq(
                 dc_ev_status=await ev_controller.get_dc_ev_status_dinspec(),
             )
@@ -517,7 +515,7 @@ class CableCheck(StateEVCC):
         pre_charge_req = PreChargeReq(
             dc_ev_status=await ev_controller.get_dc_ev_status_dinspec(),
             ev_target_voltage=dc_charge_params.dc_target_voltage,
-            ev_target_current=dc_charge_params.dc_target_current,
+            ev_target_current=PVEVTargetCurrentDin(Value=0, Multiplier=0, unit=UnitSymbol.AMPERE),
         )
         return pre_charge_req
 
@@ -566,6 +564,9 @@ class PreCharge(StateEVCC):
         ):
             self.comm_session.ongoing_timer = -1
             power_delivery_req: PowerDeliveryReq = await self.build_power_delivery_req()
+            
+            EVEREST_CTX.publish('DC_PowerOn', None)
+
             self.create_next_message(
                 PowerDelivery,
                 power_delivery_req,
@@ -596,7 +597,7 @@ class PreCharge(StateEVCC):
         pre_charge_req = PreChargeReq(
             dc_ev_status=await ev_controller.get_dc_ev_status_dinspec(),
             ev_target_voltage=dc_charge_params.dc_target_voltage,
-            ev_target_current=dc_charge_params.dc_target_current,
+            ev_target_current=PVEVTargetCurrentDin(Value=0, Multiplier=0, unit=UnitSymbol.AMPERE),
         )
         return pre_charge_req
 
@@ -712,6 +713,7 @@ class CurrentDemand(StateEVCC):
         # EVSE status must always be EVSE ready
         if dc_evse_status.evse_status_code is not DCEVSEStatusCode.EVSE_READY:
             logger.debug("EVSE Notification received requesting to stop charging.")
+            EVEREST_CTX.publish('AC_StopFromCharger', None)
             await self.stop_charging()
         elif await self.comm_session.ev_controller.continue_charging():
             try:

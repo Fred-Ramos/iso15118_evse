@@ -15,6 +15,7 @@ from typing import Coroutine, List, Optional, Tuple, Union
 
 from pydantic.error_wrappers import ValidationError
 
+from iso15118.evcc import evcc_settings
 from iso15118.evcc.controller.interface import EVControllerInterface
 from iso15118.evcc.evcc_config import EVCCConfig
 from iso15118.evcc.transport.tcp_client import TCPClient
@@ -144,6 +145,8 @@ class EVCCCommunicationSession(V2GCommunicationSession):
         self.selected_energy_mode: Optional[EnergyTransferModeEnum] = None
         self.is_tls = False
 
+        self.sae_j2847_active: int = 0
+
     def create_sap(self) -> Union[SupportedAppProtocolReq, None]:
         """
         Sends a Supported App Protocol Request (SAP Request) via TCP to the
@@ -258,7 +261,11 @@ class EVCCCommunicationSession(V2GCommunicationSession):
         # RESUME_SESSION_ID = self.session_id
         # RESUME_SELECTED_AUTH_OPTION = self.selected_auth_option
         # RESUME_REQUESTED_ENERGY_MODE = self.selected_energy_mode
-
+        
+        evcc_settings.ev_session_context.session_id = self.session_id
+        evcc_settings.ev_session_context.selected_auth_option = self.selected_auth_option
+        evcc_settings.ev_session_context.requested_energy_mode = self.selected_energy_mode
+        evcc_settings.ev_session_context.selected_energy_service = self.selected_energy_service
 
 class CommunicationSessionHandler:
     """
@@ -568,6 +575,7 @@ class CommunicationSessionHandler:
                         except SDPFailedError as exc:
                             logger.exception(exc)
                             # TODO not sure what else to do here
+                    break
                 else:
                     logger.warning(
                         "Communication session handler received "

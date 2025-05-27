@@ -8,11 +8,16 @@ import asyncio
 import logging
 from time import time
 from typing import Any, List, Union
+import os
 
 from iso15118.evcc import evcc_settings
 from iso15118.evcc.comm_session_handler import EVCCCommunicationSession
 from iso15118.evcc.states.evcc_state import StateEVCC
-from iso15118.shared.exceptions import DecryptionError, PrivateKeyReadError
+from iso15118.shared.exceptions import (
+    DecryptionError,
+    PrivateKeyReadError,
+    CertChainLengthError,
+)
 from iso15118.shared.exi_codec import EXI
 from iso15118.shared.messages.app_protocol import (
     SupportedAppProtocolReq,
@@ -25,6 +30,7 @@ from iso15118.shared.messages.datatypes import (
     EVSENotification,
     SelectedService,
     SelectedServiceList,
+    PVEVTargetCurrent,
 )
 from iso15118.shared.messages.din_spec.msgdef import V2GMessage as V2GMessageDINSPEC
 from iso15118.shared.messages.enums import (
@@ -34,6 +40,7 @@ from iso15118.shared.messages.enums import (
     IsolationLevel,
     Namespace,
     Protocol,
+    UnitSymbol,
 )
 from iso15118.shared.messages.iso15118_2.body import (
     AuthorizationReq,
@@ -101,10 +108,15 @@ from iso15118.shared.security import (
     to_ec_pub_key,
     verify_signature,
 )
-from iso15118.shared.states import Terminate
+from iso15118.shared.states import Pause, Terminate
+
+from iso15118.shared.settings import get_PKI_PATH
 
 logger = logging.getLogger(__name__)
 
+# *** EVerest code start ***
+from iso15118.evcc.everest import context as EVEREST_CTX
+# *** EVerest code end ***
 
 # ============================================================================
 # |    COMMON EVCC STATES (FOR BOTH AC AND DC CHARGING) - ISO 15118-2        |
@@ -231,25 +243,25 @@ class ServiceDiscovery(StateEVCC):
         communication session and reuse for resumed session, otherwise request
         from EV controller.
         """
-        if evcc_settings.RESUME_REQUESTED_ENERGY_MODE:
+        if evcc_settings.ev_session_context.requested_energy_mode:
             logger.debug(
                 "Reusing energy transfer mode "
-                f"{evcc_settings.RESUME_REQUESTED_ENERGY_MODE} "
+                f"{evcc_settings.ev_session_context.requested_energy_mode} "
                 "from previously paused session"
             )
             self.comm_session.selected_energy_mode = (
-                evcc_settings.RESUME_REQUESTED_ENERGY_MODE
+                evcc_settings.ev_session_context.requested_energy_mode
             )
-            evcc_settings.RESUME_REQUESTED_ENERGY_MODE = None
+            evcc_settings.ev_session_context.requested_energy_mode = None
         else:
             self.comm_session.selected_energy_mode = (
                 await self.comm_session.ev_controller.get_energy_transfer_mode(
                     Protocol.ISO_15118_2
                 )
             )
-            self.comm_session.selected_charging_type_is_ac = (
-                self.comm_session.selected_energy_mode.value.startswith("AC")
-            )
+        self.comm_session.selected_charging_type_is_ac = (
+            self.comm_session.selected_energy_mode.value.startswith("AC")
+        )
 
     def select_auth_mode(self, auth_option_list: List[AuthEnum]):
         """
@@ -257,16 +269,16 @@ class ServiceDiscovery(StateEVCC):
         saved from a previously paused communication session and reuse for
         resumed session, otherwise request from EV controller.
         """
-        if evcc_settings.RESUME_SELECTED_AUTH_OPTION:
+        if evcc_settings.ev_session_context.selected_auth_option:
             logger.debug(
                 "Reusing authorization option "
-                f"{evcc_settings.RESUME_SELECTED_AUTH_OPTION} "
+                f"{evcc_settings.ev_session_context.selected_auth_option} "
                 "from previously paused session"
             )
             self.comm_session.selected_auth_option = (
-                evcc_settings.RESUME_SELECTED_AUTH_OPTION
+                evcc_settings.ev_session_context.selected_auth_option
             )
-            evcc_settings.RESUME_SELECTED_AUTH_OPTION = None
+            evcc_settings.ev_session_context.selected_auth_option = None
         else:
             # Choose Plug & Charge (pnc) or External Identification Means (eim)
             # as the selected authorization option. The car manufacturer might
@@ -292,7 +304,7 @@ class ServiceDiscovery(StateEVCC):
             SelectedService(service_id=service_discovery_res.charge_service.service_id)
         )
 
-        if not self.comm_session.is_tls or service_discovery_res.service_list is None:
+        if service_discovery_res.service_list is None:
             return
 
         offered_services: str = ""
@@ -310,6 +322,8 @@ class ServiceDiscovery(StateEVCC):
                 and self.comm_session.selected_auth_option == AuthEnum.PNC_V2
                 and await self.comm_session.ev_controller.is_cert_install_needed()
             ):
+                if not self.comm_session.is_tls:
+                    return
                 # Make sure to send a ServiceDetailReq for the
                 # Certificate service
                 self.comm_session.service_details_to_request.append(service.service_id)
@@ -321,6 +335,15 @@ class ServiceDiscovery(StateEVCC):
                 self.comm_session.selected_services.append(
                     SelectedService(service_id=ServiceID.CERTIFICATE)
                 )
+            if (
+                service.service_category == ServiceCategory.CUSTOM
+                and await self.comm_session.ev_controller.is_sae_j2847_v2g_active() == True
+                and (service.service_id == ServiceID.V2H or service.service_id == ServiceID.V2G)
+            ):
+                self.comm_session.selected_services.append(
+                    SelectedService(service_id = service.service_id)
+                )
+                self.comm_session.sae_j2847_active = service.service_id
 
             # Request more service details if you're interested in e.g.
             # an Internet service or a use case-specific service
@@ -417,10 +440,10 @@ class PaymentServiceSelection(StateEVCC):
             if await self.comm_session.ev_controller.is_cert_install_needed():
                 # TODO: Find a more generic way to serach for all available
                 #       V2GRootCA certificates
-                issuer, serial = get_cert_issuer_serial(CertPath.V2G_ROOT_DER)
+                issuer, serial = get_cert_issuer_serial(os.path.join(get_PKI_PATH(), CertPath.V2G_ROOT_DER))
                 cert_install_req = CertificateInstallationReq(
                     id="id1",
-                    oem_provisioning_cert=load_cert(CertPath.OEM_LEAF_DER),
+                    oem_provisioning_cert=load_cert(os.path.join(get_PKI_PATH(), CertPath.OEM_LEAF_DER)),
                     list_of_root_cert_ids=RootCertificateIDList(
                         x509_issuer_serials=[
                             X509IssuerSerial(
@@ -441,9 +464,9 @@ class PaymentServiceSelection(StateEVCC):
                             )
                         ],
                         load_priv_key(
-                            KeyPath.OEM_LEAF_PEM,
+                            os.path.join(get_PKI_PATH(), KeyPath.OEM_LEAF_PEM),
                             KeyEncoding.PEM,
-                            KeyPasswordPath.OEM_LEAF_KEY_PASSWORD,
+                            os.path.join(get_PKI_PATH(), KeyPasswordPath.OEM_LEAF_KEY_PASSWORD),
                         ),
                     )
 
@@ -463,12 +486,12 @@ class PaymentServiceSelection(StateEVCC):
             else:
                 try:
                     payment_details_req = PaymentDetailsReq(
-                        emaid=eMAID(get_cert_cn(load_cert(CertPath.CONTRACT_LEAF_DER))),
+                        emaid=eMAID(get_cert_cn(load_cert(os.path.join(get_PKI_PATH(), CertPath.CONTRACT_LEAF_DER)))),
                         cert_chain=load_cert_chain(
                             protocol=Protocol.ISO_15118_2,
-                            leaf_path=CertPath.CONTRACT_LEAF_DER,
-                            sub_ca2_path=CertPath.MO_SUB_CA2_DER,
-                            sub_ca1_path=CertPath.MO_SUB_CA1_DER,
+                            leaf_path=os.path.join(get_PKI_PATH(), CertPath.CONTRACT_LEAF_DER),
+                            sub_ca2_path=os.path.join(get_PKI_PATH(), CertPath.MO_SUB_CA2_DER),
+                            sub_ca1_path=os.path.join(get_PKI_PATH(), CertPath.MO_SUB_CA1_DER),
                         ),
                     )
                 except FileNotFoundError as exc:
@@ -546,7 +569,7 @@ class CertificateInstallation(StateEVCC):
             ],
             leaf_cert=cert_install_res.cps_cert_chain.certificate,
             sub_ca_certs=cert_install_res.cps_cert_chain.sub_certificates.certificates,
-            root_ca_cert=load_cert(CertPath.V2G_ROOT_DER),
+            root_ca_cert=load_cert(os.path.join(get_PKI_PATH(), CertPath.V2G_ROOT_DER)),
         ):
             self.stop_state_machine(
                 "Signature verification of " "CertificateInstallationRes failed"
@@ -557,15 +580,15 @@ class CertificateInstallation(StateEVCC):
             decrypted_priv_key = decrypt_priv_key(
                 encrypted_priv_key_with_iv=cert_install_res.encrypted_private_key.value,
                 ecdh_priv_key=load_priv_key(
-                    KeyPath.OEM_LEAF_PEM,
+                    os.path.join(get_PKI_PATH(), KeyPath.OEM_LEAF_PEM),
                     KeyEncoding.PEM,
-                    KeyPasswordPath.OEM_LEAF_KEY_PASSWORD,
+                    os.path.join(get_PKI_PATH(), KeyPasswordPath.OEM_LEAF_KEY_PASSWORD),
                 ),
                 ecdh_pub_key=to_ec_pub_key(cert_install_res.dh_public_key.value),
             )
 
             await self.comm_session.ev_controller.store_contract_cert_and_priv_key(
-                cert_install_res.contract_cert_chain.certificate, decrypted_priv_key
+                cert_install_res.contract_cert_chain, decrypted_priv_key
             )
         except DecryptionError:
             self.stop_state_machine(
@@ -579,14 +602,21 @@ class CertificateInstallation(StateEVCC):
                 f"CertificateInstallationRes. {exc}"
             )
             return
+        except CertChainLengthError:
+            self.stop_state_machine(
+                f"CertChainLengthError, max "
+                f"{exc.allowed_num_sub_cas} sub-CAs allowed "
+                f"but {exc.num_sub_cas} sub-CAs provided"
+            )
+            return
 
         payment_details_req = PaymentDetailsReq(
-            emaid=get_cert_cn(load_cert(CertPath.CONTRACT_LEAF_DER)),
+            emaid=get_cert_cn(load_cert(os.path.join(get_PKI_PATH(), CertPath.CONTRACT_LEAF_DER))),
             cert_chain=load_cert_chain(
                 protocol=Protocol.ISO_15118_2,
-                leaf_path=CertPath.CONTRACT_LEAF_DER,
-                sub_ca2_path=CertPath.MO_SUB_CA2_DER,
-                sub_ca1_path=CertPath.MO_SUB_CA1_DER,
+                leaf_path=os.path.join(get_PKI_PATH(), CertPath.CONTRACT_LEAF_DER),
+                sub_ca2_path=os.path.join(get_PKI_PATH(), CertPath.MO_SUB_CA2_DER),
+                sub_ca1_path=os.path.join(get_PKI_PATH(), CertPath.MO_SUB_CA1_DER),
             ),
         )
 
@@ -637,9 +667,9 @@ class PaymentDetails(StateEVCC):
                     )
                 ],
                 load_priv_key(
-                    KeyPath.CONTRACT_LEAF_PEM,
+                    os.path.join(get_PKI_PATH(), KeyPath.CONTRACT_LEAF_PEM),
                     KeyEncoding.PEM,
-                    KeyPasswordPath.CONTRACT_LEAF_KEY_PASSWORD,
+                    os.path.join(get_PKI_PATH(), KeyPasswordPath.CONTRACT_LEAF_KEY_PASSWORD),
                 ),
             )
 
@@ -771,6 +801,10 @@ class ChargeParameterDiscovery(StateEVCC):
             ) = await ev_controller.process_sa_schedules_v2(
                 charge_params_res.sa_schedule_list.schedule_tuples
             )
+
+            # EVerest code start #
+            EVEREST_CTX.publish('AC_EVPowerReady', True)
+            # EVerest code end #
             await self.comm_session.ev_controller.enable_charging(True)
             if self.comm_session.selected_charging_type_is_ac:
                 power_delivery_req = PowerDeliveryReq(
@@ -816,9 +850,16 @@ class ChargeParameterDiscovery(StateEVCC):
             else:
                 self.comm_session.ongoing_timer = time()
 
-            charge_params = await ev_controller.get_charge_params_v2(
+            if (await ev_controller.is_sae_j2847_v2g_active() == True
+                and self.comm_session.sae_j2847_active == ServiceID.V2H
+            ):
+              charge_params = await ev_controller.get_charge_params_v2h(
                 Protocol.ISO_15118_2
             )
+            else:
+                charge_params = await ev_controller.get_charge_params_v2(
+                    Protocol.ISO_15118_2
+                )
 
             charge_parameter_discovery_req = ChargeParameterDiscoveryReq(
                 requested_energy_mode=charge_params.energy_mode,
@@ -925,9 +966,17 @@ class PowerDelivery(StateEVCC):
             )
 
     async def build_current_demand_data(self) -> CurrentDemandReq:
-        dc_ev_charge_params = (
-            await self.comm_session.ev_controller.get_dc_charge_params()
-        )
+
+        if (await self.comm_session.ev_controller.is_sae_j2847_v2g_active() == True
+            and self.comm_session.sae_j2847_active == ServiceID.V2H
+        ):
+            dc_ev_charge_params = (
+                await self.comm_session.ev_controller.get_dc_discharge_params()
+            )
+        else: 
+            dc_ev_charge_params = (
+                await self.comm_session.ev_controller.get_dc_charge_params()
+            )
         current_demand_req = CurrentDemandReq(
             dc_ev_status=await self.comm_session.ev_controller.get_dc_ev_status(),
             ev_target_current=dc_ev_charge_params.dc_target_current,
@@ -1079,7 +1128,10 @@ class SessionStop(StateEVCC):
             self.comm_session.writer.get_extra_info("peername"),
         )
 
-        self.next_state = Terminate
+        if self.comm_session.charging_session_stop_v2 == ChargingSession.PAUSE:
+            self.next_state = Pause
+        elif self.comm_session.charging_session_stop_v2 == ChargingSession.TERMINATE:
+            self.next_state = Terminate
 
         return
 
@@ -1116,6 +1168,12 @@ class ChargingStatus(StateEVCC):
         charging_status_res: ChargingStatusRes = msg.body.charging_status_res
         ac_evse_status: ACEVSEStatus = charging_status_res.ac_evse_status
 
+        # EVerest code start #
+        if charging_status_res.evse_max_current:
+            evse_max_current = charging_status_res.evse_max_current.value * pow(10, charging_status_res.evse_max_current.multiplier)
+            EVEREST_CTX.publish('AC_EVSEMaxCurrent', evse_max_current)
+        # EVerest code end #
+
         if charging_status_res.receipt_required and self.comm_session.is_tls:
             logger.debug("SECC requested MeteringReceipt")
 
@@ -1137,9 +1195,9 @@ class ChargingStatus(StateEVCC):
                         )
                     ],
                     load_priv_key(
-                        KeyPath.CONTRACT_LEAF_PEM,
+                        os.path.join(get_PKI_PATH(), KeyPath.CONTRACT_LEAF_PEM),
                         KeyEncoding.PEM,
-                        KeyPasswordPath.CONTRACT_LEAF_KEY_PASSWORD,
+                        os.path.join(get_PKI_PATH(), KeyPasswordPath.CONTRACT_LEAF_KEY_PASSWORD),
                     ),
                 )
 
@@ -1170,8 +1228,12 @@ class ChargingStatus(StateEVCC):
             )
             logger.debug(f"ChargeProgress is set to {ChargeProgress.RENEGOTIATE}")
         elif ac_evse_status.evse_notification == EVSENotification.STOP_CHARGING:
-            await self.stop_charging()
-
+            EVEREST_CTX.publish('AC_StopFromCharger', None)
+            self.comm_session.charging_session_stop_v2 = ChargingSession.TERMINATE
+            await self.stop_pause_charging()
+        elif await self.comm_session.ev_controller.pause():
+            self.comm_session.charging_session_stop_v2 = ChargingSession.PAUSE
+            await self.stop_pause_charging()
         elif await self.comm_session.ev_controller.continue_charging():
             try:
                 delay: int = (
@@ -1188,9 +1250,10 @@ class ChargingStatus(StateEVCC):
                 Namespace.ISO_V2_MSG_DEF,
             )
         else:
-            await self.stop_charging()
+            self.comm_session.charging_session_stop_v2 = ChargingSession.TERMINATE
+            await self.stop_pause_charging()
 
-    async def stop_charging(self):
+    async def stop_pause_charging(self):
         power_delivery_req = PowerDeliveryReq(
             charge_progress=ChargeProgress.STOP,
             sa_schedule_tuple_id=self.comm_session.selected_schedule,
@@ -1201,7 +1264,6 @@ class ChargingStatus(StateEVCC):
             Timeouts.POWER_DELIVERY_REQ,
             Namespace.ISO_V2_MSG_DEF,
         )
-        self.comm_session.charging_session_stop_v2 = ChargingSession.TERMINATE
         # TODO Implement also a mechanism for pausing
         logger.debug(f"ChargeProgress is set to {ChargeProgress.STOP}")
 
@@ -1283,7 +1345,7 @@ class CableCheck(StateEVCC):
         pre_charge_req = PreChargeReq(
             dc_ev_status=await self.comm_session.ev_controller.get_dc_ev_status(),
             ev_target_voltage=charge_params.dc_target_voltage,
-            ev_target_current=charge_params.dc_target_current,
+            ev_target_current=PVEVTargetCurrent(Value=0, Multiplier=0, unit=UnitSymbol.AMPERE),
         )
         return pre_charge_req
 
@@ -1325,6 +1387,9 @@ class PreCharge(StateEVCC):
                     await ev_controller.get_dc_ev_power_delivery_parameter()
                 ),
             )
+
+            EVEREST_CTX.publish('DC_PowerOn', None)
+
             self.create_next_message(
                 PowerDelivery,
                 power_delivery_req,
@@ -1357,7 +1422,7 @@ class PreCharge(StateEVCC):
         pre_charge_req = PreChargeReq(
             dc_ev_status=await self.comm_session.ev_controller.get_dc_ev_status(),
             ev_target_voltage=charge_params.dc_target_voltage,
-            ev_target_current=charge_params.dc_target_current,
+            ev_target_current=PVEVTargetCurrent(Value=0, Multiplier=0, unit=UnitSymbol.AMPERE),
         )
         return pre_charge_req
 
@@ -1390,8 +1455,12 @@ class CurrentDemand(StateEVCC):
         dc_evse_status: DCEVSEStatus = current_demand_res.dc_evse_status
 
         if dc_evse_status.evse_notification == EVSENotification.STOP_CHARGING:
-            await self.stop_charging()
-
+            EVEREST_CTX.publish('AC_StopFromCharger', None)
+            self.comm_session.charging_session_stop_v2 = ChargingSession.TERMINATE
+            await self.stop_pause_charging()
+        elif await self.comm_session.ev_controller.pause():
+            self.comm_session.charging_session_stop_v2 = ChargingSession.PAUSE
+            await self.stop_pause_charging()
         elif await self.comm_session.ev_controller.continue_charging():
             try:
                 delay: int = (
@@ -1410,11 +1479,39 @@ class CurrentDemand(StateEVCC):
                 Namespace.ISO_V2_MSG_DEF,
             )
         else:
-            await self.stop_charging()
+            self.comm_session.charging_session_stop_v2 = ChargingSession.TERMINATE
+            await self.stop_pause_charging()
 
-    async def build_current_demand_data(self) -> CurrentDemandReq:
+    async def build_current_demand_data(self, current_demand_res: CurrentDemandRes) -> CurrentDemandReq:
         ev_controller = self.comm_session.ev_controller
-        dc_ev_charge_params = await ev_controller.get_dc_charge_params()
+
+        if (await ev_controller.is_sae_j2847_v2g_active() == True
+            and self.comm_session.sae_j2847_active == ServiceID.V2H
+        ):
+            dc_ev_charge_params = (
+                await ev_controller.get_dc_discharge_params()
+            )
+        elif (await ev_controller.is_sae_j2847_v2g_active() == True
+              and self.comm_session.sae_j2847_active == ServiceID.V2G
+        ):
+            # Trigger via CurrentDemandRes -> Check EvsePresentCurrent, EvseMaximumCurrentLimit & EvseMaximumPowerLimit
+            if (current_demand_res.evse_present_current.value < 0
+                and current_demand_res.evse_max_current_limit.value < 0
+                and current_demand_res.evse_max_power_limit.value < 0
+            ):
+                dc_ev_charge_params = (
+                    await ev_controller.get_dc_discharge_params()
+                )
+            else:
+                dc_ev_charge_params = (
+                    await ev_controller.get_dc_charge_params()
+                )
+        # Todo(sl): trigger via node-red bpt and normal charging
+            
+        else: 
+            dc_ev_charge_params = (
+                await ev_controller.get_dc_charge_params()
+            )
         current_demand_req = CurrentDemandReq(
             dc_ev_status=await ev_controller.get_dc_ev_status(),
             ev_target_current=dc_ev_charge_params.dc_target_current,
@@ -1432,7 +1529,7 @@ class CurrentDemand(StateEVCC):
         )
         return current_demand_req
 
-    async def stop_charging(self):
+    async def stop_pause_charging(self):
         ev_controller = self.comm_session.ev_controller
         power_delivery_req = PowerDeliveryReq(
             charge_progress=ChargeProgress.STOP,
@@ -1448,7 +1545,6 @@ class CurrentDemand(StateEVCC):
             Timeouts.POWER_DELIVERY_REQ,
             Namespace.ISO_V2_MSG_DEF,
         )
-        self.comm_session.charging_session_stop_v2 = ChargingSession.TERMINATE
         logger.debug(f"ChargeProgress is set to {ChargeProgress.STOP}")
 
 

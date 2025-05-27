@@ -5,8 +5,12 @@ This module contains the code to retrieve (hardware-related) data from the EVSE
 
 import base64
 import logging
+import math
 import time
-from typing import Dict, List, Optional, Union
+import calendar
+from typing import Dict, List, Optional, Union, cast
+import dateutil.parser
+import os
 
 from iso15118.secc.controller.common import UnknownEnergyService
 from iso15118.secc.controller.evse_data import (
@@ -30,6 +34,7 @@ from iso15118.shared.messages.datatypes import (
     DCEVSEChargeParameter,
     DCEVSEStatus,
     DCEVSEStatusCode,
+    PVEVSEEnergyToBeDelivered,
 )
 from iso15118.shared.messages.datatypes import EVSENotification as EVSENotificationV2
 from iso15118.shared.messages.datatypes import (
@@ -39,6 +44,11 @@ from iso15118.shared.messages.datatypes import (
     PVEVSEMinCurrentLimit,
     PVEVSEMinVoltageLimit,
     PVEVSEPeakCurrentRipple,
+    PVEVSEPresentCurrent,
+    PVEVSEPresentVoltage,
+    PVEVTargetCurrent,
+    PVEVTargetVoltage,
+    PVEVSECurrentRegulationTolerance
 )
 from iso15118.shared.messages.din_spec.datatypes import (
     PMaxScheduleEntry as PMaxScheduleEntryDINSPEC,
@@ -159,10 +169,17 @@ from iso15118.shared.security import (
     load_cert,
     load_priv_key,
 )
+from iso15118.shared.settings import V20_EVSE_SERVICES_CONFIG, get_PKI_PATH
+
+from iso15118.secc.everest import context as EVEREST_CONTEXT, float2Value_Multiplier
+from iso15118.secc.everest import float2Value_Multiplier
+
+import asyncio
 from iso15118.shared.states import State
 
 logger = logging.getLogger(__name__)
 
+EVEREST_CHARGER_STATE = EVEREST_CONTEXT.charger_state
 
 def get_evse_context():
     ac_limits = EVSEACCPDLimits(
@@ -253,6 +270,7 @@ class SimEVSEController(EVSEControllerInterface):
 
     def __init__(self):
         super().__init__()
+        self.evseIsolationMonitoringActive = False
         self.ev_data_context = EVDataContext()
         self.evse_data_context = get_evse_context()
 
@@ -266,6 +284,8 @@ class SimEVSEController(EVSEControllerInterface):
         logger.debug(f"New Status: {status}")
 
     async def get_evse_id(self, protocol: Protocol) -> str:
+        """Overrides EVSEControllerInterface.get_evse_id()."""
+
         if protocol == Protocol.DIN_SPEC_70121:
             #  To transform a string-based DIN SPEC 91286 EVSE ID to hexBinary
             #  representation and vice versa, the following conversion rules shall
@@ -275,28 +295,27 @@ class SimEVSEController(EVSEControllerInterface):
             #  Unused <--> 0xB .. 0xF.
             # Example: The DIN SPEC 91286 EVSE ID “49*89*6360” is represented
             # as “0x49 0xA8 0x9A 0x63 0x60”.
-            return "49A89A6360"
-        """Overrides EVSEControllerInterface.get_evse_id()."""
-        return "UK123E1234"
+            evse_id_din: str = EVEREST_CHARGER_STATE.EVSEID_DIN
+            return evse_id_din
+        else:
+            evse_id: str = EVEREST_CHARGER_STATE.EVSEID
+            return evse_id
 
     async def get_supported_energy_transfer_modes(
         self, protocol: Protocol
     ) -> List[EnergyTransferModeEnum]:
         """Overrides EVSEControllerInterface.get_supported_energy_transfer_modes()."""
-        if protocol == Protocol.DIN_SPEC_70121:
-            """
-            For DIN SPEC, only DC_CORE and DC_EXTENDED are supported.
-            The other DC modes DC_COMBO_CORE and DC_DUAL are out of scope for DIN SPEC
-            """
-            dc_extended = EnergyTransferModeEnum.DC_EXTENDED
-            return [dc_extended]
 
-        # It's not valid to have mixed energy transfer modes associated with
-        # a single EVSE. Providing this here only for simulation purposes.
-        # ac_single_phase = EnergyTransferModeEnum.AC_SINGLE_PHASE_CORE
-        ac_three_phase = EnergyTransferModeEnum.AC_THREE_PHASE_CORE
-        dc_extended = EnergyTransferModeEnum.DC_EXTENDED
-        return [dc_extended, ac_three_phase]
+        supported_energy_transfer_modes: List[EnergyTransferModeEnum] = []
+        for modes in EVEREST_CHARGER_STATE.SupportedEnergyTransferMode:
+            energy_mode = EnergyTransferModeEnum(modes)
+            if protocol == Protocol.DIN_SPEC_70121:
+                if energy_mode is EnergyTransferModeEnum.DC_CORE or energy_mode is EnergyTransferModeEnum.DC_EXTENDED:
+                    supported_energy_transfer_modes.append(energy_mode)
+            else:
+                supported_energy_transfer_modes.append(energy_mode)
+
+        return supported_energy_transfer_modes
 
     async def get_schedule_exchange_params(
         self,
@@ -357,9 +376,11 @@ class SimEVSEController(EVSEControllerInterface):
             power_range_start=RationalNumber(exponent=0, value=0),
         )
 
-        price_rule_stack = PriceRuleStack(duration=3600, price_rules=[price_rule])
+        price_rule_stack = PriceRuleStack(
+            duration=3600, price_rules=[price_rule])
 
-        price_rule_stacks = PriceRuleStackList(price_rule_stacks=[price_rule_stack])
+        price_rule_stacks = PriceRuleStackList(
+            price_rule_stacks=[price_rule_stack])
 
         overstay_rule = OverstayRule(
             description="What a great description",
@@ -503,7 +524,8 @@ class SimEVSEController(EVSEControllerInterface):
                     parameter_set_id += 1
         except AttributeError as e:
             logger.error(
-                f"No ServiceParameterList available for service ID {service_id}"
+                f"No ServiceParameterList available for service ID {
+                    service_id}"
             )
             raise e
 
@@ -572,21 +594,23 @@ class SimEVSEController(EVSEControllerInterface):
         hash_data: Optional[List[Dict[str, str]]] = None,
     ) -> AuthorizationResponse:
         """Overrides EVSEControllerInterface.is_authorized()."""
-        protocol = self.get_selected_protocol()
-        response_code: Optional[
-            Union[ResponseCodeDINSPEC, ResponseCodeV2, ResponseCodeV20]
-        ] = None
-        if protocol == Protocol.DIN_SPEC_70121:
-            response_code = ResponseCodeDINSPEC.OK
-        elif protocol == Protocol.ISO_15118_20_COMMON_MESSAGES:
-            response_code = ResponseCodeV20.OK
-        else:
-            response_code = ResponseCodeV2.OK
 
-        return AuthorizationResponse(
-            authorization_status=AuthorizationStatus.ACCEPTED,
-            certificate_response_status=response_code,
-        )
+        if id_token_type is AuthorizationTokenType.EXTERNAL:
+
+            if EVEREST_CHARGER_STATE.auth_status == "Accepted":
+                return AuthorizationStatus.ACCEPTED
+
+        elif id_token_type is AuthorizationTokenType.EMAID:
+
+            pnc_auth_status: str = EVEREST_CHARGER_STATE.auth_status
+            certificate_status = EVEREST_CHARGER_STATE.certificate_status
+
+            if pnc_auth_status == "Accepted" and certificate_status in ['Ongoing', 'Accepted']:
+                return AuthorizationStatus.ACCEPTED
+            elif (pnc_auth_status == "Ongoing" and certificate_status == "Ongoing"):
+                return AuthorizationStatus.ONGOING
+            else:
+                return AuthorizationStatus.REJECTED
 
     async def get_sa_schedule_list_dinspec(
         self, max_schedule_entries: Optional[int], departure_time: int = 0
@@ -701,8 +725,16 @@ class SimEVSEController(EVSEControllerInterface):
 
     async def get_meter_info_v2(self) -> MeterInfoV2:
         """Overrides EVSEControllerInterface.get_meter_info_v2()."""
+        meter_id: str = "EVerest"
+
+        powermeter: dict = EVEREST_CHARGER_STATE.powermeter
+        meter_reading: int = int(powermeter["energy_Wh_import"]["total"])
+        t_meter_datetime = dateutil.parser.isoparse(powermeter["timestamp"])
+        if powermeter["meter_id"]:
+            meter_id = str(powermeter["meter_id"])
+
         return MeterInfoV2(
-            meter_id="Switch-Meter-123", meter_reading=12345, t_meter=time.time()
+            meter_id=meter_id, t_meter=int(calendar.timegm(t_meter_datetime.timetuple())), meter_reading=meter_reading
         )
 
     async def get_meter_info_v20(self) -> MeterInfoV20:
@@ -734,11 +766,31 @@ class SimEVSEController(EVSEControllerInterface):
 
     async def is_contactor_closed(self) -> Optional[bool]:
         """Overrides EVSEControllerInterface.is_contactor_closed()."""
-        return True
+        startTime_ns: int = time.time_ns()
+        timeout: int = 0
+        PERFORMANCE_TIMEOUT: int = 4500
+
+        while timeout < PERFORMANCE_TIMEOUT:
+            if EVEREST_CHARGER_STATE.contactorClosed is True:
+                return True
+
+            timeout = (time.time_ns() - startTime_ns) / pow(10, 6)
+            await asyncio.sleep(0.001)
+        return False
 
     async def is_contactor_opened(self) -> bool:
         """Overrides EVSEControllerInterface.is_contactor_opened()."""
-        return True
+        startTime_ns: int = time.time_ns()
+        timeout: int = 0
+        PERFORMANCE_TIMEOUT: int = 4500
+
+        while timeout < PERFORMANCE_TIMEOUT:
+            if EVEREST_CHARGER_STATE.contactorOpen is True:
+                return True
+
+            timeout = (time.time_ns() - startTime_ns) / pow(10, 6)
+            await asyncio.sleep(0.001)
+        return False
 
     async def get_evse_status(self) -> Optional[EVSEStatus]:
         """Overrides EVSEControllerInterface.get_evse_status()."""
@@ -762,8 +814,23 @@ class SimEVSEController(EVSEControllerInterface):
         #    )
         return None
 
+    async def get_receipt_required(self) -> bool:
+        return EVEREST_CHARGER_STATE.ReceiptRequired
+
+    async def reset_evse_values(self):
+        EVEREST_CHARGER_STATE.reset()
+
+    async def get_evse_payment_options(self) -> list:
+        return EVEREST_CHARGER_STATE.PaymentOptions
+
+    async def is_free(self) -> bool:
+        return EVEREST_CHARGER_STATE.FreeService
+
     async def set_present_protocol_state(self, state: State):
         logger.info(f"iso15118 state: {str(state)}")
+
+    async def allow_cert_install_service(self) -> bool:
+        return EVEREST_CHARGER_STATE.certificate_service_supported
 
     # ============================================================================
     # |                          AC-SPECIFIC FUNCTIONS                           |
@@ -771,19 +838,29 @@ class SimEVSEController(EVSEControllerInterface):
 
     async def get_ac_evse_status(self) -> ACEVSEStatus:
         """Overrides EVSEControllerInterface.get_ac_evse_status()."""
+
+        notification: EVSENotificationV2 = EVSENotificationV2.NONE
+        if EVEREST_CHARGER_STATE.stop_charging is True:
+            notification = EVSENotificationV2.STOP_CHARGING
+
         return ACEVSEStatus(
             notification_max_delay=0,
-            evse_notification=EVSENotificationV2.NONE,
-            rcd=False,
+            evse_notification=notification,
+            rcd=EVEREST_CHARGER_STATE.RCD_Error,
         )
 
     async def get_ac_charge_params_v2(self) -> ACEVSEChargeParameter:
         """Overrides EVSEControllerInterface.get_ac_evse_charge_parameter()."""
+
+        nominal_voltage_value, nominal_voltage_multiplier = float2Value_Multiplier(
+            EVEREST_CHARGER_STATE.EVSENominalVoltage)
         evse_nominal_voltage = PVEVSENominalVoltage(
-            multiplier=0, value=400, unit=UnitSymbol.VOLTAGE
+            multiplier=nominal_voltage_multiplier, value=nominal_voltage_value, unit=UnitSymbol.VOLTAGE
         )
+        max_current_value, max_current_multiplier = float2Value_Multiplier(
+            EVEREST_CHARGER_STATE.EVSEMaxCurrent)
         evse_max_current = PVEVSEMaxCurrent(
-            multiplier=0, value=32, unit=UnitSymbol.AMPERE
+            multiplier=max_current_multiplier, value=max_current_value, unit=UnitSymbol.AMPERE
         )
         return ACEVSEChargeParameter(
             ac_evse_status=await self.get_ac_evse_status(),
@@ -818,15 +895,30 @@ class SimEVSEController(EVSEControllerInterface):
         elif energy_service == ServiceV20.AC_BPT:
             return BPTACChargeParameterDiscoveryResParams(
                 **(ac_charge_parameter_discovery_res_params.dict()),
-                evse_max_discharge_power=RationalNumber.get_rational_repr(30000),
-                evse_max_discharge_power_l2=RationalNumber.get_rational_repr(30000),
-                evse_max_discharge_power_l3=RationalNumber.get_rational_repr(30000),
-                evse_min_discharge_power=RationalNumber.get_rational_repr(100),
-                evse_min_discharge_power_l2=RationalNumber.get_rational_repr(100),
-                evse_min_discharge_power_l3=RationalNumber.get_rational_repr(100),
+                evse_max_discharge_power=RationalNumber(
+                    exponent=0, value=3000),
+                evse_max_discharge_power_l2=RationalNumber(
+                    exponent=0, value=3000),
+                evse_max_discharge_power_l3=RationalNumber(
+                    exponent=0, value=3000),
+                evse_min_discharge_power=RationalNumber(exponent=0, value=300),
+                evse_min_discharge_power_l2=RationalNumber(
+                    exponent=0, value=300),
+                evse_min_discharge_power_l3=RationalNumber(
+                    exponent=0, value=300),
             )
         else:
             raise UnknownEnergyService(f"Unknown Service {energy_service}")
+
+    async def get_ac_evse_max_current(self) -> PVEVSEMaxCurrent:
+        max_current_value, max_current_multiplier = float2Value_Multiplier(
+            EVEREST_CHARGER_STATE.EVSEMaxCurrent)
+        return PVEVSEMaxCurrent(multiplier=max_current_multiplier, value=max_current_value, unit=UnitSymbol.AMPERE)
+
+    async def get_ac_evse_max_current(self) -> PVEVSEMaxCurrent:
+        max_current_value, max_current_multiplier = float2Value_Multiplier(
+            EVEREST_CHARGER_STATE.EVSEMaxCurrent)
+        return PVEVSEMaxCurrent(multiplier=max_current_multiplier, value=max_current_value, unit=UnitSymbol.AMPERE)
 
     # ============================================================================
     # |                          DC-SPECIFIC FUNCTIONS                           |
@@ -834,41 +926,115 @@ class SimEVSEController(EVSEControllerInterface):
 
     async def get_dc_evse_status(self) -> DCEVSEStatus:
         """Overrides EVSEControllerInterface.get_dc_evse_status()."""
+
+        notification: EVSENotificationV2 = EVSENotificationV2.NONE
+        if EVEREST_CHARGER_STATE.stop_charging is True:
+            notification = EVSENotificationV2.STOP_CHARGING
+
+        evse_isolation: IsolationLevel = IsolationLevel(
+            EVEREST_CHARGER_STATE.EVSEIsolationStatus)
+
+        evse_status_code: DCEVSEStatusCode = DCEVSEStatusCode.EVSE_READY
+        if EVEREST_CHARGER_STATE.EVSE_UtilityInterruptEvent is True:
+            evse_status_code = DCEVSEStatusCode.EVSE_UTILITY_INTERUPT_EVENT
+        elif EVEREST_CHARGER_STATE.EVSE_Malfunction is True:
+            evse_status_code = DCEVSEStatusCode.EVSE_MALFUNCTION
+        elif EVEREST_CHARGER_STATE.EVSE_EmergencyShutdown is True:
+            evse_status_code = DCEVSEStatusCode.EVSE_EMERGENCY_SHUTDOWN
+        elif self.evseIsolationMonitoringActive is True:
+            evse_status_code = DCEVSEStatusCode.EVSE_ISOLATION_MONITORING_ACTIVE
+        elif EVEREST_CHARGER_STATE.stop_charging is True:
+            evse_status_code = DCEVSEStatusCode.EVSE_SHUTDOWN
+
         return DCEVSEStatus(
-            evse_notification=EVSENotificationV2.NONE,
+            evse_notification=notification,
             notification_max_delay=0,
-            evse_isolation_status=IsolationLevel.VALID,
-            evse_status_code=DCEVSEStatusCode.EVSE_READY,
+            evse_isolation_status=evse_isolation,
+            evse_status_code=evse_status_code,
         )
 
     async def get_dc_charge_parameters(self) -> DCEVSEChargeParameter:
         """Overrides EVSEControllerInterface.get_dc_evse_charge_parameter()."""
-        return DCEVSEChargeParameter(
-            dc_evse_status=DCEVSEStatus(
-                notification_max_delay=100,
-                evse_notification=EVSENotificationV2.NONE,
-                evse_isolation_status=IsolationLevel.VALID,
-                evse_status_code=DCEVSEStatusCode.EVSE_READY,
-            ),
+
+        c_ripple_value, c_ripple_multiplier = float2Value_Multiplier(
+            EVEREST_CHARGER_STATE.EVSEPeakCurrentRipple
+        )
+        c_max_limit_value, c_max_limit_multiplier = float2Value_Multiplier(
+            EVEREST_CHARGER_STATE.EVSEMaximumCurrentLimit
+        )
+        p_max_limit_value, p_max_limit_multiplier = float2Value_Multiplier(
+            EVEREST_CHARGER_STATE.EVSEMaximumPowerLimit
+        )
+        v_max_limit_value, v_max_limit_multiplier = float2Value_Multiplier(
+            EVEREST_CHARGER_STATE.EVSEMaximumVoltageLimit
+        )
+        c_min_limit_value, c_min_limit_multiplier = float2Value_Multiplier(
+            EVEREST_CHARGER_STATE.EVSEMinimumCurrentLimit
+        )
+        v_min_limit_value, v_min_limit_multiplier = float2Value_Multiplier(
+            EVEREST_CHARGER_STATE.EVSEMinimumVoltageLimit
+        )
+
+        dcEVSEChargeParameter: DCEVSEChargeParameter = DCEVSEChargeParameter(
+            dc_evse_status=await self.get_dc_evse_status(),
             evse_maximum_power_limit=PVEVSEMaxPowerLimit(
-                multiplier=1, value=230, unit="W"
+                multiplier=p_max_limit_multiplier, value=p_max_limit_value, unit="W"
             ),
             evse_maximum_current_limit=PVEVSEMaxCurrentLimit(
-                multiplier=1, value=4, unit="A"
+                multiplier=c_max_limit_multiplier, value=c_max_limit_value, unit="A"
             ),
             evse_maximum_voltage_limit=PVEVSEMaxVoltageLimit(
-                multiplier=1, value=4, unit="V"
+                multiplier=v_max_limit_multiplier, value=v_max_limit_value, unit="V"
             ),
             evse_minimum_current_limit=PVEVSEMinCurrentLimit(
-                multiplier=1, value=2, unit="A"
+                multiplier=c_min_limit_multiplier, value=c_min_limit_value, unit="A"
             ),
             evse_minimum_voltage_limit=PVEVSEMinVoltageLimit(
-                multiplier=1, value=4, unit="V"
+                multiplier=v_min_limit_multiplier, value=v_min_limit_value, unit="V"
             ),
             evse_peak_current_ripple=PVEVSEPeakCurrentRipple(
-                multiplier=1, value=4, unit="A"
-            ),
+                multiplier=c_ripple_multiplier, value=c_ripple_value, unit="A"
+            )
         )
+
+        if EVEREST_CHARGER_STATE.EVSECurrentRegulationTolerance is not None:
+            current_reg_tol_value, current_reg_tol_multiplier = float2Value_Multiplier(
+                EVEREST_CHARGER_STATE.EVSECurrentRegulationTolerance
+            )
+            dcEVSEChargeParameter.evse_current_regulation_tolerance = PVEVSECurrentRegulationTolerance(
+                multiplier=current_reg_tol_multiplier, value=current_reg_tol_value, unit="A"
+            )
+        if EVEREST_CHARGER_STATE.EVSEEnergyToBeDelivered is not None:
+            energy_deliver_value, energy_deliver_multiplier = float2Value_Multiplier(
+                EVEREST_CHARGER_STATE.EVSEEnergyToBeDelivered
+            )
+            dcEVSEChargeParameter.evse_energy_to_be_delivered = PVEVSEEnergyToBeDelivered(
+                multiplier=energy_deliver_multiplier, value=energy_deliver_value, unit="Wh"
+            )
+
+        return dcEVSEChargeParameter
+
+    async def get_evse_present_voltage(
+        self, protocol: Protocol
+    ) -> Union[PVEVSEPresentVoltage, RationalNumber]:
+        """Overrides EVSEControllerInterface.get_evse_present_voltage()."""
+        v_value, v_multiplier = float2Value_Multiplier(
+            EVEREST_CHARGER_STATE.EVSEPresentVoltage)
+        if protocol in [Protocol.DIN_SPEC_70121, Protocol.ISO_15118_2]:
+            return PVEVSEPresentVoltage(multiplier=v_multiplier, value=v_value, unit="V")
+        else:
+            return RationalNumber(exponent=v_multiplier, value=v_value)
+
+    async def get_evse_present_current(
+        self, protocol: Protocol
+    ) -> Union[PVEVSEPresentCurrent, RationalNumber]:
+        """Overrides EVSEControllerInterface.get_evse_present_current()."""
+        c_value, c_multiplier = float2Value_Multiplier(
+            EVEREST_CHARGER_STATE.EVSEPresentCurrent)
+        if protocol in [Protocol.DIN_SPEC_70121, Protocol.ISO_15118_2]:
+            return PVEVSEPresentCurrent(multiplier=c_multiplier, value=c_value, unit="A")
+        else:
+            return RationalNumber(exponent=c_multiplier, value=c_value)
 
     async def start_cable_check(self):
         """Overrides EVSEControllerInterface.start_cable_check()."""
@@ -888,22 +1054,39 @@ class SimEVSEController(EVSEControllerInterface):
         pass
 
     async def is_evse_current_limit_achieved(self) -> bool:
+        if EVEREST_CHARGER_STATE.EVSEPresentCurrent >= EVEREST_CHARGER_STATE.EVSEMaximumCurrentLimit:
+            return True
         return False
 
     async def is_evse_voltage_limit_achieved(self) -> bool:
+        if EVEREST_CHARGER_STATE.EVSEPresentVoltage >= EVEREST_CHARGER_STATE.EVSEMaximumVoltageLimit:
+            return True
         return False
 
     async def is_evse_power_limit_achieved(self) -> bool:
+        presentPower: float = EVEREST_CHARGER_STATE.EVSEPresentCurrent * \
+            EVEREST_CHARGER_STATE.EVSEPresentVoltage
+        if presentPower >= EVEREST_CHARGER_STATE.EVSEMaximumPowerLimit:
+            return True
         return False
 
     async def get_evse_max_voltage_limit(self) -> PVEVSEMaxVoltageLimit:
-        return PVEVSEMaxVoltageLimit(multiplier=0, value=600, unit="V")
+        v_max_limit_value, v_max_limit_multiplier = float2Value_Multiplier(
+            EVEREST_CHARGER_STATE.EVSEMaximumVoltageLimit
+        )
+        return PVEVSEMaxVoltageLimit(multiplier=v_max_limit_multiplier, value=v_max_limit_value, unit="V")
 
     async def get_evse_max_current_limit(self) -> PVEVSEMaxCurrentLimit:
-        return PVEVSEMaxCurrentLimit(multiplier=0, value=300, unit="A")
+        c_max_limit_value, c_max_limit_multiplier = float2Value_Multiplier(
+            EVEREST_CHARGER_STATE.EVSEMaximumCurrentLimit
+        )
+        return PVEVSEMaxCurrentLimit(multiplier=c_max_limit_multiplier, value=c_max_limit_value, unit="A")
 
     async def get_evse_max_power_limit(self) -> PVEVSEMaxPowerLimit:
-        return PVEVSEMaxPowerLimit(multiplier=1, value=1000, unit="W")
+        p_max_limit_value, p_max_limit_multiplier = float2Value_Multiplier(
+            EVEREST_CHARGER_STATE.EVSEMaximumPowerLimit
+        )
+        return PVEVSEMaxPowerLimit(multiplier=p_max_limit_multiplier, value=p_max_limit_value, unit="W")
 
     async def get_dc_charge_params_v20(
         self, energy_service: ServiceV20
@@ -925,13 +1108,141 @@ class SimEVSEController(EVSEControllerInterface):
         elif energy_service == ServiceV20.DC_BPT:
             return BPTDCChargeParameterDiscoveryResParams(
                 **(dc_charge_parameter_discovery_res.dict()),
-                evse_max_discharge_power=RationalNumber.get_rational_repr(1000),
-                evse_min_discharge_power=RationalNumber.get_rational_repr(100),
-                evse_max_discharge_current=RationalNumber.get_rational_repr(100),
-                evse_min_discharge_current=RationalNumber.get_rational_repr(10),
+                evse_max_discharge_power=RationalNumber.get_rational_repr(
+                    self.evse_data_context.rated_limits.dc_bpt_limits.evse_max_discharge_power  # noqa
+                ),
+                evse_min_discharge_power=RationalNumber.get_rational_repr(
+                    self.evse_data_context.rated_limits.dc_bpt_limits.evse_min_discharge_power  # noqa
+                ),
+                evse_max_discharge_current=RationalNumber.get_rational_repr(
+                    self.evse_data_context.rated_limits.dc_bpt_limits.evse_max_discharge_current  # noqa
+                ),
+                evse_min_discharge_current=RationalNumber.get_rational_repr(
+                    self.evse_data_context.rated_limits.dc_bpt_limits.evse_min_discharge_current  # noqa
+                ),
             )
+        return None
+
+    async def get_dc_charge_loop_params_v20(
+        self, control_mode: ControlMode, selected_service: ServiceV20
+    ) -> Optional[
+        Union[
+            ScheduledDCChargeLoopResParams,
+            BPTScheduledDCChargeLoopResParams,
+            DynamicDCChargeLoopRes,
+            BPTDynamicDCChargeLoopRes,
+        ]
+    ]:
+        """Overrides EVSEControllerInterface.get_dc_charge_loop_params()."""
+        if selected_service == ServiceV20.DC:
+            if control_mode == ControlMode.SCHEDULED:
+                scheduled_params = ScheduledDCChargeLoopResParams(
+                    evse_maximum_charge_power=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_max_charge_power  # noqa
+                    ),
+                    evse_minimum_charge_power=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_min_charge_power  # noqa
+                    ),
+                    evse_maximum_charge_current=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_max_charge_current  # noqa
+                    ),
+                    evse_maximum_voltage=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_max_voltage  # noqa
+                    ),
+                )
+                return scheduled_params
+            elif control_mode == ControlMode.DYNAMIC:
+                dynamic_params = DynamicDCChargeLoopRes(
+                    departure_time=self.evse_data_context.session_context.ev_departure_time,  # noqa
+                    min_soc=self.evse_data_context.session_context.ev_min_soc,
+                    target_soc=self.evse_data_context.session_context.ev_target_soc,
+                    ack_max_delay=self.evse_data_context.session_context.ack_max_delay,
+                    evse_maximum_charge_power=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_max_charge_power  # noqa
+                    ),
+                    evse_minimum_charge_power=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_min_charge_power  # noqa
+                    ),
+                    evse_maximum_charge_current=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_max_charge_current  # noqa
+                    ),
+                    evse_maximum_voltage=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_max_voltage  # noqa
+                    ),
+                )
+                return dynamic_params
+            return None
+        elif selected_service == ServiceV20.DC_BPT:
+            if control_mode == ControlMode.SCHEDULED:
+                bpt_scheduled_params = BPTScheduledDCChargeLoopResParams(
+                    evse_maximum_charge_power=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_max_charge_power  # noqa
+                    ),
+                    evse_minimum_charge_power=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_min_charge_power  # noqa
+                    ),
+                    evse_maximum_charge_current=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_max_charge_current  # noqa
+                    ),
+                    evse_maximum_voltage=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_max_voltage  # noqa
+                    ),
+                    evse_max_discharge_power=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_max_discharge_power  # noqa
+                    ),
+                    evse_min_discharge_power=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_min_discharge_power  # noqa
+                    ),
+                    evse_max_discharge_current=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_max_discharge_current  # noqa
+                    ),
+                    evse_min_voltage=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_min_voltage  # noqa
+                    ),
+                )
+                return bpt_scheduled_params
+            else:
+                bpt_dynamic_params = BPTDynamicDCChargeLoopRes(
+                    departure_time=self.evse_data_context.session_context.ev_departure_time,  # noqa
+                    min_soc=self.evse_data_context.session_context.ev_min_soc,
+                    target_soc=self.evse_data_context.session_context.ev_target_soc,
+                    ack_max_delay=self.evse_data_context.session_context.ack_max_delay,
+                    evse_maximum_charge_power=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_max_charge_power  # noqa
+                    ),
+                    evse_minimum_charge_power=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_min_charge_power  # noqa
+                    ),
+                    evse_maximum_charge_current=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_max_charge_current  # noqa
+                    ),
+                    evse_maximum_voltage=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_max_voltage  # noqa
+                    ),
+                    evse_max_discharge_power=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_max_discharge_power  # noqa
+                    ),
+                    evse_min_discharge_power=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_min_discharge_power  # noqa
+                    ),
+                    evse_max_discharge_current=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_max_discharge_current  # noqa
+                    ),
+                    evse_min_voltage=RationalNumber.get_rational_repr(
+                        self.evse_data_context.session_context.dc_limits.evse_min_voltage  # noqa
+                    ),
+                )
+                return bpt_dynamic_params
         else:
-            raise UnknownEnergyService(f"Unknown Service {energy_service}")
+            logger.error(f"Energy service {
+                         selected_service.name} not yet supported")
+            return None
+
+    async def setIsolationMonitoringActive(self, value: bool):
+        self.evseIsolationMonitoringActive = value
+
+    async def isCableCheckFinished(self) -> bool:
+        return EVEREST_CHARGER_STATE.cableCheck_Finished
 
     async def get_15118_ev_certificate(
         self, base64_encoded_cert_installation_req: str, namespace: str
@@ -939,140 +1250,36 @@ class SimEVSEController(EVSEControllerInterface):
         """
         Overrides EVSEControllerInterface.get_15118_ev_certificate().
 
-        Here we simply mock the actions of the backend.
-        The code here is almost the same as what is done if USE_CPO_BACKEND
-        is set to False. Except that both the request and response is base64 encoded.
+        # Here we simply mock the actions of the backend.
+        # The code here is almost the same as what is done if USE_CPO_BACKEND
+        # is set to False. Except that both the request and response is base64 encoded.
         """
-        cert_install_req_exi = base64.b64decode(base64_encoded_cert_installation_req)
-        cert_install_req = EXI().from_exi(cert_install_req_exi, namespace)
-        try:
-            dh_pub_key, encrypted_priv_key_bytes = encrypt_priv_key(
-                oem_prov_cert=load_cert(CertPath.OEM_LEAF_DER),
-                priv_key_to_encrypt=load_priv_key(
-                    KeyPath.CONTRACT_LEAF_PEM,
-                    KeyEncoding.PEM,
-                    KeyPasswordPath.CONTRACT_LEAF_KEY_PASSWORD,
-                ),
-            )
-        except EncryptionError:
-            raise EncryptionError(
-                "EncryptionError while trying to encrypt the private key for the "
-                "contract certificate"
-            )
-        except PrivateKeyReadError as exc:
-            raise PrivateKeyReadError(
-                f"Can't read private key to encrypt for CertificateInstallationRes:"
-                f" {exc}"
-            )
 
-        # The elements that need to be part of the signature
-        contract_cert_chain = CertificateChain(
-            id="id1",
-            certificate=load_cert(CertPath.CONTRACT_LEAF_DER),
-            sub_certificates=SubCertificates(
-                certificates=[
-                    load_cert(CertPath.MO_SUB_CA2_DER),
-                    load_cert(CertPath.MO_SUB_CA1_DER),
-                ]
-            ),
-        )
-        encrypted_priv_key = EncryptedPrivateKey(
-            id="id2", value=encrypted_priv_key_bytes
-        )
-        dh_public_key = DHPublicKey(id="id3", value=dh_pub_key)
-        emaid = EMAID(
-            id="id4", value=get_cert_cn(load_cert(CertPath.CONTRACT_LEAF_DER))
-        )
-        cps_certificate_chain = CertificateChain(
-            certificate=load_cert(CertPath.CPS_LEAF_DER),
-            sub_certificates=SubCertificates(
-                certificates=[
-                    load_cert(CertPath.CPS_SUB_CA2_DER),
-                    load_cert(CertPath.CPS_SUB_CA1_DER),
-                ]
-            ),
-        )
+        startTime_ns: int = time.time_ns()
+        timeout: int = 0
+        PERFORMANCE_TIMEOUT: int = 4500
 
-        cert_install_res = CertificateInstallationRes(
-            response_code=ResponseCodeV2.OK,
-            cps_cert_chain=cps_certificate_chain,
-            contract_cert_chain=contract_cert_chain,
-            encrypted_private_key=encrypted_priv_key,
-            dh_public_key=dh_public_key,
-            emaid=emaid,
-        )
+        while timeout < PERFORMANCE_TIMEOUT:
 
-        try:
-            # Elements to sign, containing its id and the exi encoded stream
-            contract_cert_tuple = (
-                cert_install_res.contract_cert_chain.id,
-                EXI().to_exi(
-                    cert_install_res.contract_cert_chain, Namespace.ISO_V2_MSG_DEF
-                ),
-            )
-            encrypted_priv_key_tuple = (
-                cert_install_res.encrypted_private_key.id,
-                EXI().to_exi(
-                    cert_install_res.encrypted_private_key, Namespace.ISO_V2_MSG_DEF
-                ),
-            )
-            dh_public_key_tuple = (
-                cert_install_res.dh_public_key.id,
-                EXI().to_exi(cert_install_res.dh_public_key, Namespace.ISO_V2_MSG_DEF),
-            )
-            emaid_tuple = (
-                cert_install_res.emaid.id,
-                EXI().to_exi(cert_install_res.emaid, Namespace.ISO_V2_MSG_DEF),
-            )
+            Response: dict = EVEREST_CHARGER_STATE.existream_status
+            if Response:
+                if Response["certificateAction"] == "Install":
+                    if Response["status"] == "Accepted":
+                        exiResponse: str = str(Response["exiResponse"])
+                        return exiResponse
+                    elif Response["status"] == "Failed":
+                        raise Exception(
+                            "The CSMS reported: Processing of the message was not successful")
+                elif Response["certificateAction"] == "Update":
+                    action: str = str(Response["certificateAction"])
+                    raise Exception(
+                        f"The wrong message was generated by the backend: {action}")
 
-            elements_to_sign = [
-                contract_cert_tuple,
-                encrypted_priv_key_tuple,
-                dh_public_key_tuple,
-                emaid_tuple,
-            ]
-            # The private key to be used for the signature
-            signature_key = load_priv_key(
-                KeyPath.CPS_LEAF_PEM,
-                KeyEncoding.PEM,
-                KeyPasswordPath.CPS_LEAF_KEY_PASSWORD,
-            )
+            timeout = (time.time_ns() - startTime_ns) / pow(10, 6)
+            await asyncio.sleep(0.001)
 
-            signature = create_signature(elements_to_sign, signature_key)
-
-        except PrivateKeyReadError as exc:
-            raise Exception(
-                "Can't read private key needed to create signature "
-                f"for CertificateInstallationRes: {exc}",
-            )
-        except Exception as exc:
-            raise Exception(f"Error creating signature {exc}")
-
-        if isinstance(cert_install_req, CertificateInstallationReq):
-            header = MessageHeaderV2(
-                session_id=cert_install_req.header.session_id,
-                signature=signature,
-            )
-            body = Body.parse_obj(
-                {"CertificateInstallationRes": cert_install_res.dict()}
-            )
-            to_be_exi_encoded = V2GMessageV2(header=header, body=body)
-            exi_encoded_cert_installation_res = EXI().to_exi(
-                to_be_exi_encoded, Namespace.ISO_V2_MSG_DEF
-            )
-
-            # base64.b64encode in Python is a binary transform
-            # so the return value is byte[]
-            # But the CPO expects exi_encoded_cert_installation_res
-            # as a string, hence the added .decode("utf-8")
-            base64_encode_cert_install_res = base64.b64encode(
-                exi_encoded_cert_installation_res
-            ).decode("utf-8")
-
-            return base64_encode_cert_install_res
-        else:
-            logger.info(f"Ignoring EXI decoding of a {type(cert_install_req)} message.")
-            return ""
+        raise Exception(
+            "Timeout - The backend takes too long to generate the CertificateInstallationRes")
 
     async def update_data_link(self, action: SessionStopAction) -> None:
         """

@@ -154,6 +154,8 @@ class SupportedAppProtocol(StateEVCC):
                     )
                     raise MessageProcessingError("SupportedAppProtocolReq")
                 break
+        
+        await self.comm_session.ev_controller.reset_ev_values()
 
         if match:
             logger.info(f"Chosen protocol: {self.comm_session.protocol}")
@@ -180,11 +182,14 @@ class SupportedAppProtocol(StateEVCC):
         with the specified length in bytes.
         The session ID is also stored as a comm session variable.
         """
-        # TODO: get the session id from Redis
-        if evcc_settings.RESUME_SESSION_ID:
-            self.comm_session.session_id = evcc_settings.RESUME_SESSION_ID
-            evcc_settings.RESUME_SESSION_ID = None
+        if evcc_settings.ev_session_context.session_id:
+            self.comm_session.session_id = evcc_settings.ev_session_context.session_id
+            evcc_settings.ev_session_context.session_id = None
         else:
             self.comm_session.session_id = bytes(length).hex().upper()
+            # Reset whole ev_session_context
+            evcc_settings.ev_session_context.selected_auth_option = None
+            evcc_settings.ev_session_context.requested_energy_mode = None
+            evcc_settings.ev_session_context.selected_energy_service = None
 
         return self.comm_session.session_id

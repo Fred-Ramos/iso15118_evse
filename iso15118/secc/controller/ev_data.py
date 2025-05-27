@@ -883,8 +883,8 @@ class EVDataContext:
 
 
 @dataclass
-class EVSessionContext15118:
-    # EVSessionContext15118 holds information required to resume a paused session.
+class EVSessionContext:
+    # EVSessionContext holds information required to resume a paused session.
     # [V2G2-741] - In a resumed session, the following are reused:
     # 1. SessionID (SessionSetup)
     # 2. PaymentOption that was previously selected (ServiceDiscoveryRes)

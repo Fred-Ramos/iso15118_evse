@@ -16,13 +16,14 @@ import socket
 from asyncio.streams import StreamReader, StreamWriter
 from typing import Any, Coroutine, Dict, List, Optional, Tuple, Union
 
-from iso15118.secc.controller.ev_data import EVSessionContext15118
+from iso15118.secc.controller.ev_data import EVSessionContext
 from iso15118.secc.controller.interface import EVSEControllerInterface, ServiceStatus
 from iso15118.secc.failed_responses import (
     init_failed_responses_din_spec_70121,
     init_failed_responses_iso_v2,
     init_failed_responses_iso_v20,
 )
+from iso15118.secc import secc_settings
 from iso15118.secc.secc_settings import Config
 from iso15118.secc.transport.tcp_server import TCPServer
 from iso15118.secc.transport.udp_server import UDPServer
@@ -79,7 +80,7 @@ class SECCCommunicationSession(V2GCommunicationSession):
         config: Config,
         evse_controller: EVSEControllerInterface,
         evse_id: str,
-        ev_session_context: Optional[EVSessionContext15118] = None,
+        ev_session_context: Optional[EVSessionContext] = None,
     ):
         # Need to import here to avoid a circular import error
         # pylint: disable=import-outside-toplevel
@@ -95,8 +96,8 @@ class SECCCommunicationSession(V2GCommunicationSession):
         # EVSE ID associated with this session
         self.evse_id = evse_id
         # EV Session context associated if available.
-        self.ev_session_context: EVSessionContext15118 = (
-            ev_session_context or EVSessionContext15118()
+        self.ev_session_context: EVSessionContext = (
+            ev_session_context or EVSessionContext()
         )
         # The authorization option(s) offered with ServiceDiscoveryRes in
         # ISO 15118-2 and with AuthorizationSetupRes in ISO 15118-20
@@ -138,11 +139,12 @@ class SECCCommunicationSession(V2GCommunicationSession):
         # CurrentDemandRes. The SECC must send a copy in the MeteringReceiptReq
         # TODO Add support for ISO 15118-20 MeterInfo
         self.sent_meter_info: Optional[MeterInfoV2] = None
+        if secc_settings.save_ev_session_context.session_id is not None:
+            self.ev_session_context = secc_settings.save_ev_session_context
         self.is_tls = self._is_tls(transport)
 
     def save_session_info(self):
-        # TODO make sure to not delete the comm session object
-        pass
+        secc_settings.save_ev_session_context = self.ev_session_context
 
     def _is_tls(self, transport: Tuple[StreamReader, StreamWriter]) -> bool:
         """
@@ -223,7 +225,8 @@ class CommunicationSessionHandler:
         else:
             logger.info(f"UDP server disabled on {iface}")
 
-        self.tcp_server = TCPServer(self._rcv_queue, iface)
+        self.tcp_server = TCPServer(
+            self._rcv_queue, iface, self.config.ciphersuites)
 
         self.list_of_tasks.extend(
             [
@@ -324,7 +327,8 @@ class CommunicationSessionHandler:
                 elif isinstance(notification, StopNotification):
                     try:
                         await self.end_current_session(
-                            notification.peer_ip_address, notification.stop_action
+                            notification.peer_ip_address,
+                            notification.stop_action,
                         )
                     except KeyError:
                         pass
@@ -368,7 +372,6 @@ class CommunicationSessionHandler:
                 logger.info(
                     f"Preserved session state: {self.comm_sessions[peer_ip_address[0]][0].ev_session_context}"  # noqa
                 )
-
         self.tcp_server_handler = None
         self._current_peer_ip = None
         if self.udp_server:
@@ -380,7 +383,8 @@ class CommunicationSessionHandler:
             try:
                 await cancel_task(self.tcp_server_handler)
             except Exception as e:
-                logger.warning(f"Error cancelling existing tcp server handler: {e}")
+                logger.warning(
+                    f"Error cancelling existing tcp server handler: {e}")
             self.tcp_server_handler = None
 
         server_ready_event: asyncio.Event = asyncio.Event()

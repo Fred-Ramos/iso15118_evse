@@ -6,6 +6,7 @@ from typing import List, Optional, Type
 import environs
 
 from iso15118.secc.controller.interface import EVSEControllerInterface
+from iso15118.secc.controller.interface import EVSessionContext
 from iso15118.shared.messages.enums import AuthEnum, Protocol
 from iso15118.shared.settings import load_shared_settings, shared_settings
 from iso15118.shared.utils import load_requested_auth_modes, load_requested_protocols
@@ -37,6 +38,15 @@ class Config:
         "EIM",
         "PNC",
     ]
+    # The SECC must support both ciphers defined in ISO 15118-20
+    # OpenSSL 1.3 supports TLS 1.3 cipher suites by default.
+    # Calling .set_ciphers to be more evident about what is available.
+    # Cipher suites for both 15118-20 and 15118-2 are provided to be compatible with
+    # both 15118 families [V2G20-2059]. The order is as specified in the
+    # specification [V2G20-1856]
+    ciphersuites: List[str] = "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:ECDH-ECDSA-AES128-SHA256:ECDHE-ECDSA-AES128-SHA256"
+
+    verify_contract_cert_chain = False
     env_dump: Optional[dict] = None
 
     def load_envs(self, env_path: Optional[str] = None) -> None:
@@ -117,3 +127,5 @@ class Config:
         logger.info("SECC settings:")
         for key, value in self.env_dump.items():
             logger.info(f"{key:30}: {value}")
+
+save_ev_session_context: EVSessionContext = EVSessionContext()

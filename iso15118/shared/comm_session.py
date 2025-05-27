@@ -182,7 +182,8 @@ class SessionStateMachine(ABC):
         try:
             # First extract the V2GMessage payload from the V2GTPMessage ...
             # and then decode the bytearray into the message
-            v2gtp_msg = V2GTPMessage.from_bytes(self.comm_session.protocol, message)
+            v2gtp_msg = V2GTPMessage.from_bytes(
+                self.comm_session.protocol, message)
         except InvalidV2GTPMessageError as exc:
             logger.exception("Incoming TCPPacket is not a valid V2GTPMessage")
             raise exc
@@ -222,6 +223,10 @@ class SessionStateMachine(ABC):
             )
             raise exc
 
+        if self.comm_session.__class__.__name__ == "SECCCommunicationSession":
+            debugV2GMessages(decoded_message=decoded_message,
+                             v2gtp_msg=v2gtp_msg)
+
         # Shouldn't happen, but just to be sure (otherwise mypy would complain)
         if not decoded_message:
             logger.error(
@@ -251,7 +256,7 @@ class SessionStateMachine(ABC):
 
         if (
             self.current_state.next_v2gtp_msg is None
-            and self.current_state.next_state is not Terminate
+            and not self.current_state.next_state in [Terminate, Pause]
         ):
             raise FaultyStateImplementationError(
                 "Field 'next_v2gtp_msg' is "
@@ -480,7 +485,8 @@ class V2GCommunicationSession(SessionStateMachine):
                 else:
                     error_msg = f"{exc.__class__.__name__} occurred. {str(exc)}"
 
-                self.stop_reason = StopNotification(False, error_msg, self.peer_name)
+                self.stop_reason = StopNotification(
+                    False, error_msg, self.peer_name)
 
                 await self.stop(reason=error_msg)
                 self.session_handler_queue.put_nowait(self.stop_reason)
@@ -493,10 +499,18 @@ class V2GCommunicationSession(SessionStateMachine):
                 # next_state, next_v2gtp_message, next_message_payload_type etc.
                 await self.process_message(message)
                 if self.current_state.next_v2gtp_msg:
+                    if self.comm_session.__class__.__name__ == "EVCCCommunicationSession":
+                        if self.current_state.message.__str__() == "CurrentDemandReq" or self.current_state.message.__str__() == "CurrentDemandRes":
+                            await asyncio.sleep(0.25)
+                        else:
+                            await asyncio.sleep(0.5)
                     # next_v2gtp_msg would not be set only if the next state is either
                     # Terminate or Pause on the EVCC side
                     await self.send(self.current_state.next_v2gtp_msg)
                     await self._update_state_info(self.current_state)
+                    if self.comm_session.__class__.__name__ == "SECCCommunicationSession":
+                        debugV2GMessages(decoded_message=self.current_state.message,
+                                         v2gtp_msg=self.current_state.next_v2gtp_msg)
 
                 if self.current_state.next_state in (Terminate, Pause):
                     await self.stop(reason=self.comm_session.stop_reason.reason)
@@ -546,3 +560,43 @@ class V2GCommunicationSession(SessionStateMachine):
             finally:
                 if gc_enabled:
                     gc.enable()
+
+def debugV2GMessages(decoded_message, v2gtp_msg):
+    from iso15118.secc.everest import context as EVEREST_CTX
+    import json
+    from iso15118.shared.exi_codec import CustomJSONEncoder
+    import base64
+    from iso15118.shared.states import Base64
+
+    if EVEREST_CTX.charger_state.debug_mode:
+
+        if isinstance(decoded_message, Base64):
+            return
+
+        msg_to_dct: dict = decoded_message.dict(by_alias=True, exclude_none=True)
+        if isinstance(decoded_message, V2GMessageV2) or isinstance(
+            decoded_message, V2GMessageDINSPEC
+        ):
+            message_dict = {"V2G_Message": msg_to_dct}
+        else:
+            message_dict = {str(decoded_message): msg_to_dct}
+        msg_content = json.dumps(message_dict, cls=CustomJSONEncoder)
+
+        classname: str = ""
+        if isinstance(decoded_message, V2GMessageV2) or isinstance(
+            decoded_message, V2GMessageDINSPEC
+        ):
+            classname = decoded_message.__str__()
+        elif isinstance(decoded_message, SupportedAppProtocolReq):
+            classname = "SupportedAppProtocolReq"
+        elif isinstance(decoded_message, SupportedAppProtocolRes):
+            classname = "SupportedAppProtocolRes"
+
+        v2gmessages: dict = dict([
+            ("V2G_Message_ID", classname),
+            ("V2G_Message_JSON", msg_content),
+            ("V2G_Message_EXI_Hex",v2gtp_msg.payload.hex()),
+            ("V2G_Message_EXI_Base64", base64.b64encode(v2gtp_msg.payload).hex())
+        ])
+
+        EVEREST_CTX.publish('V2G_Messages', v2gmessages)

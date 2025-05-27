@@ -3,6 +3,8 @@ from typing import Tuple
 
 from iso15118.shared.messages.enums import SessionStopAction
 
+from iso15118.shared.messages.enums import SessionStopAction
+
 
 class Notification:
     """

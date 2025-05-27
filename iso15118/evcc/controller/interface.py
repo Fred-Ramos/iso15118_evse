@@ -19,7 +19,12 @@ from iso15118.shared.messages.din_spec.datatypes import DCEVStatus as DCEVStatus
 from iso15118.shared.messages.din_spec.datatypes import (
     SAScheduleTupleEntry as SAScheduleTupleEntryDINSPEC,
 )
-from iso15118.shared.messages.enums import ControlMode, Protocol, ServiceV20
+from iso15118.shared.messages.enums import (
+    AuthEnum,
+    ControlMode,
+    Protocol,
+    ServiceV20,
+)
 from iso15118.shared.messages.iso15118_2.datatypes import (
     ACEVChargeParameter,
     ChargeProgress,
@@ -29,6 +34,7 @@ from iso15118.shared.messages.iso15118_2.datatypes import (
     DCEVStatus,
     EnergyTransferModeEnum,
     SAScheduleTuple,
+    CertificateChain,
 )
 from iso15118.shared.messages.iso15118_20.ac import (
     ACChargeParameterDiscoveryReqParams,
@@ -72,6 +78,12 @@ class ChargeParamsV2:
     ac_parameters: Optional[ACEVChargeParameter]
     dc_parameters: Optional[DCEVChargeParameter]
 
+@dataclass
+class EVSessionContext:
+    session_id: Optional[str] = None
+    selected_auth_option: Optional[AuthEnum] = None
+    requested_energy_mode: Optional[EnergyTransferModeEnum] = None
+    selected_energy_service: Optional[SelectedEnergyService] = None
 
 class EVControllerInterface(ABC):
     # ============================================================================
@@ -358,7 +370,7 @@ class EVControllerInterface(ABC):
 
     @abstractmethod
     async def store_contract_cert_and_priv_key(
-        self, contract_cert: bytes, priv_key: bytes
+        self, contract_cert_chain: CertificateChain, priv_key: bytes
     ):
         """
         Stores the contract certificate and associated private key, both needed

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from iso15118.secc.comm_session_handler import SECCCommunicationSession
-from iso15118.secc.controller.ev_data import EVSessionContext15118
+from iso15118.secc.controller.ev_data import EVSessionContext
 from iso15118.secc.controller.evse_data import (
     EVSEDataContext,
     EVSEDCCLLimits,
@@ -52,7 +52,7 @@ class TestEvseScenarios:
         self.comm_session.protocol = Protocol.UNKNOWN
         self.comm_session.evse_id = "UK123E1234"
         self.comm_session.writer = MockWriter()
-        self.comm_session.ev_session_context = EVSessionContext15118()
+        self.comm_session.ev_session_context = EVSessionContext()
         self.comm_session.evse_controller.evse_data_context = self.get_evse_data()
         self.comm_session.failed_responses_din_spec = (
             init_failed_responses_din_spec_70121()

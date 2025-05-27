@@ -21,13 +21,14 @@ class TCPServer(asyncio.Protocol):
     # (host, port, flowinfo, scope_id)
     ipv6_address_host: str
 
-    def __init__(self, session_handler_queue: asyncio.Queue, iface: str) -> None:
+    def __init__(self, session_handler_queue: asyncio.Queue, iface: str, ciphersuites: str) -> None:
         self._session_handler_queue: asyncio.Queue = session_handler_queue
         # The dynamic TCP port number in the range of (49152-65535)
         self.port: int = get_tcp_port()
         self.iface: str = iface
         self.server: Optional[asyncio.Server] = None
         self.is_tls_enabled: bool = False
+        self.ciphersuites = ciphersuites
 
     async def start_tls(self, ready_event: asyncio.Event):
         """
@@ -75,7 +76,7 @@ class TCPServer(asyncio.Protocol):
         server_type = "TCP"
         self.is_tls_enabled = False
         if tls:
-            ssl_context = get_ssl_context(True)
+            ssl_context = get_ssl_context(True, self.ciphersuites)
             if ssl_context is not None:
                 server_type = "TLS"
                 self.is_tls_enabled = True

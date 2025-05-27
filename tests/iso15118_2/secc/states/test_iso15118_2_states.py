@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from iso15118.secc import Config
-from iso15118.secc.controller.ev_data import EVSessionContext15118
+from iso15118.secc.controller.ev_data import EVSessionContext
 from iso15118.secc.controller.evse_data import (
     EVSEDataContext,
     EVSEDCCLLimits,
@@ -91,7 +91,7 @@ class TestV2GSessionScenarios:
     def _comm_session(self, comm_secc_session_mock):
         self.comm_session = comm_secc_session_mock
         self.comm_session.config = Config()
-        self.comm_session.ev_session_context = EVSessionContext15118()
+        self.comm_session.ev_session_context = EVSessionContext()
         self.comm_session.is_tls = False
         self.comm_session.writer = Mock()
         self.comm_session.writer.get_extra_info = Mock()
@@ -929,17 +929,17 @@ class TestV2GSessionScenarios:
         "ev_session_context, session_id, response_code",
         [
             (
-                EVSessionContext15118(),
+                EVSessionContext(),
                 "00",
                 ResponseCode.OK_NEW_SESSION_ESTABLISHED,
             ),
             (
-                EVSessionContext15118(session_id=MOCK_SESSION_ID),
+                EVSessionContext(session_id=MOCK_SESSION_ID),
                 MOCK_SESSION_ID,
                 ResponseCode.OK_OLD_SESSION_JOINED,
             ),
             (
-                EVSessionContext15118(session_id=MOCK_SESSION_ID),
+                EVSessionContext(session_id=MOCK_SESSION_ID),
                 "ABCDEF123456",
                 ResponseCode.OK_NEW_SESSION_ESTABLISHED,
             ),
@@ -958,7 +958,7 @@ class TestV2GSessionScenarios:
         "ev_session_context, auth_options, charge_service",
         [
             (
-                EVSessionContext15118(
+                EVSessionContext(
                     session_id=MOCK_SESSION_ID, auth_options=[AuthEnum.PNC_V2]
                 ),
                 [AuthEnum.PNC_V2],
@@ -976,7 +976,7 @@ class TestV2GSessionScenarios:
                 ),
             ),
             (
-                EVSessionContext15118(
+                EVSessionContext(
                     session_id=MOCK_SESSION_ID, auth_options=[AuthEnum.EIM_V2]
                 ),
                 [AuthEnum.EIM_V2],
@@ -997,7 +997,7 @@ class TestV2GSessionScenarios:
     )
     async def test_resumed_session_auth_options_charge_service(
         self,
-        ev_session_context: EVSessionContext15118,
+        ev_session_context: EVSessionContext,
         auth_options: List[AuthEnum],
         charge_service: ChargeService,
     ):
@@ -1022,14 +1022,14 @@ class TestV2GSessionScenarios:
         "ev_session_context, schedule_tuple_id, match_status",
         [
             (
-                EVSessionContext15118(
+                EVSessionContext(
                     session_id=MOCK_SESSION_ID, sa_schedule_tuple_id=1
                 ),
                 1,
                 True,
             ),
             (
-                EVSessionContext15118(
+                EVSessionContext(
                     session_id=MOCK_SESSION_ID, sa_schedule_tuple_id=2
                 ),
                 2,
@@ -1039,7 +1039,7 @@ class TestV2GSessionScenarios:
     )
     async def test_resumed_session_sa_schedule_tuple(
         self,
-        ev_session_context: EVSessionContext15118,
+        ev_session_context: EVSessionContext,
         schedule_tuple_id: int,
         match_status: bool,
     ):

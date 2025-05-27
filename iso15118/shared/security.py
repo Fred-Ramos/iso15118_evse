@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric.ec import (
     SECP256R1,
     EllipticCurvePrivateKey,
     EllipticCurvePublicKey,
+    derive_private_key,
 )
 from cryptography.hazmat.primitives.asymmetric.utils import (
     decode_dss_signature,
@@ -82,7 +83,7 @@ from iso15118.shared.messages.xmldsig import (
     Transform,
     Transforms,
 )
-from iso15118.shared.settings import SettingKey, shared_settings
+from iso15118.shared.settings import is_tls_1_3_enabled, get_PKI_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,7 @@ def get_random_bytes(nbytes: int) -> bytes:
     return secrets.token_bytes(nbytes)
 
 
-def get_ssl_context(server_side: bool) -> Optional[SSLContext]:
+def get_ssl_context(server_side: bool, ciphersuites: str = None) -> Optional[SSLContext]:
     """
     Creates an SSLContext object for the TCP client or TCP server.
     An SSL context holds various data longer-lived than single SSL
@@ -130,7 +131,7 @@ def get_ssl_context(server_side: bool) -> Optional[SSLContext]:
          as well as read the password.
     """
 
-    if shared_settings[SettingKey.ENABLE_TLS_1_3]:
+    if is_tls_1_3_enabled():
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS)
     else:
         # Specifying protocol as `PROTOCOL_TLS` does best effort.
@@ -144,10 +145,13 @@ def get_ssl_context(server_side: bool) -> Optional[SSLContext]:
         try:
             logger.info("Getting SSL context")
             ssl_context.load_cert_chain(
-                certfile=CertPath.CPO_CERT_CHAIN_PEM,
-                keyfile=KeyPath.SECC_LEAF_PEM,
-                password=load_priv_key_pass(KeyPasswordPath.SECC_LEAF_KEY_PASSWORD),
+                certfile=os.path.join(get_PKI_PATH(), CertPath.SECC_LEAF_PEM),
+                keyfile=os.path.join(get_PKI_PATH(), KeyPath.SECC_LEAF_PEM),
+                password=load_priv_key_pass(os.path.join(
+                    get_PKI_PATH(), KeyPasswordPath.SECC_LEAF_KEY_PASSWORD)),
             )
+            ssl_context.load_verify_locations(os.path.join(get_PKI_PATH(), CertPath.CPO_SUB_CA1_PEM))
+            ssl_context.load_verify_locations(os.path.join(get_PKI_PATH(), CertPath.CPO_SUB_CA2_PEM))
         except SSLError:
             logger.exception(
                 "SSLError, can't load SECC certificate chain for SSL "
@@ -163,20 +167,26 @@ def get_ssl_context(server_side: bool) -> Optional[SSLContext]:
             logger.exception(exc)
             return None
 
-        if shared_settings[SettingKey.ENABLE_TLS_1_3]:
+        if is_tls_1_3_enabled():
             # In 15118-20 we should also verify EVCC's certificate chain.
             # The spec however says TLS 1.3 should also support 15118-2
             # (Table 5 in V2G20 specification)
             # Marc/André - this suggests we will need mutual auth 15118-2 if
             # TLS1.3 is enabled.
+<<<<<<< HEAD
 
             logger.debug("TLS 1.3 is enabled: enforcing mutual authentication by verifying EVCC certificate chain")
 
             ssl_context.load_verify_locations(cafile=CertPath.OEM_ROOT_PEM)
+=======
+            ssl_context.load_verify_locations(
+                cafile=os.path.join(get_PKI_PATH(), CertPath.VEHICLE_ROOT_PEM))
+>>>>>>> everest/everest
             ssl_context.verify_mode = VerifyMode.CERT_REQUIRED
         else:
             # In ISO 15118-2, we only verify the SECC's certificates
             ssl_context.verify_mode = VerifyMode.CERT_NONE
+<<<<<<< HEAD
         # The SECC must support both ciphers defined in ISO 15118-20
         # OpenSSL 1.3 supports TLS 1.3 cipher suites by default.
         # Calling .set_ciphers to be more evident about what is available.
@@ -194,39 +204,37 @@ def get_ssl_context(server_side: bool) -> Optional[SSLContext]:
 
         logger.debug(f"Setting TLS cipher suites to: {cipher_list}")
         ssl_context.set_ciphers(cipher_list)
+=======
+        ssl_context.set_ciphers(ciphersuites)
+>>>>>>> everest/everest
     else:
         # Load the V2G Root CA certificate(s) to validate the SECC's leaf and
         # Sub-CA CPO certificates. The cafile string is the path to a file of
         # concatenated (if several exist) V2G Root CA certificates in PEM format
-        ssl_context.load_verify_locations(cafile=CertPath.V2G_ROOT_PEM)
+        ssl_context.load_verify_locations(
+            cafile=os.path.join(get_PKI_PATH(), CertPath.V2G_ROOT_PEM))
         ssl_context.check_hostname = False
         ssl_context.verify_mode = VerifyMode.CERT_REQUIRED
-        # In 15118-20, the EVCC must support all cipher suites in the spec [V2G20-2459]
-        # In 15118-2, the EVCC must support only one cipher suite, so let's choose the
-        # more secure one (ECDHE enables perfect forward secrecy)
-        ssl_context.set_ciphers(
-            "TLS_AES_256_GCM_SHA384:"
-            "TLS_CHACHA20_POLY1305_SHA256:"
-            "ECDHE-ECDSA-AES128-SHA256"
-        )
+        ssl_context.set_ciphers(ciphersuites)
 
-        if shared_settings[SettingKey.ENABLE_TLS_1_3]:
+        if is_tls_1_3_enabled():
             try:
                 ssl_context.load_cert_chain(
-                    certfile=CertPath.OEM_CERT_CHAIN_PEM,
-                    keyfile=KeyPath.OEM_LEAF_PEM,
-                    password=load_priv_key_pass(KeyPasswordPath.OEM_LEAF_KEY_PASSWORD),
+                    certfile=os.path.join(get_PKI_PATH(), CertPath.VEHICLE_CERT_CHAIN_PEM),
+                    keyfile=os.path.join(get_PKI_PATH(), KeyPath.VEHICLE_LEAF_PEM),
+                    password=load_priv_key_pass(os.path.join(
+                        get_PKI_PATH(), KeyPasswordPath.VEHICLE_LEAF_KEY_PASSWORD)),
                 )
             except SSLError:
                 logger.exception(
-                    "SSLError, can't load OEM certificate chain for SSL "
+                    "SSLError, can't load Vehicle certificate chain for SSL "
                     "context. Private key (keyfile) probably doesn't "
                     "match certificate (certfile) or password for "
                     "private is key invalid. Returning None instead."
                 )
                 return None
             except FileNotFoundError:
-                logger.exception("Can't find OEM certfile or keyfile for SSL context")
+                logger.exception("Can't find Vehicle certfile or keyfile for SSL context")
                 return None
             except Exception as exc:
                 logger.exception(exc)
@@ -375,6 +383,40 @@ def to_ec_pub_key(public_key_bytes: bytes) -> EllipticCurvePublicKey:
             "convert byets to EllipticCurvePublicKey instance"
         )
         raise exc
+
+def to_ec_priv_key(private_key_bytes: bytes) -> EllipticCurvePrivateKey:
+    """
+    Takes a private key in bytes for the named elliptic curve secp256R1, as used
+    ISO 15118-2, and returns it as an instance of EllipticCurvePrivateKey.
+
+    Args:
+        private_key_bytes: The elliptic curve private key, serialised as bytes.
+
+    Returns:
+        An instance of EllipticCurvePrivateKey corresponding to the provided
+        bytes object.
+
+    Raises:
+        ValueError, TypeError
+    """
+
+    try:
+        priv_key_value = int.from_bytes(private_key_bytes, "big")
+        ec_priv_key = derive_private_key(priv_key_value, SECP256R1())
+        return ec_priv_key
+    except ValueError as exc:
+        logging.exception(
+            "An invalid point is supplied, can't convert "
+            "bytes to EllipticCurvePublicKey instance"
+        )
+        raise exc
+    except TypeError as exc:
+        logging.exception(
+            "Curve provided is not an EllipticCurve, can't "
+            "convert byets to EllipticCurvePublicKey instance"
+        )
+        raise exc
+
 
 
 def load_cert(cert_path: str) -> bytes:
@@ -1333,7 +1375,7 @@ def get_ocsp_url_for_certificate(certificate: Certificate) -> str:
             ).value,
         )
     except ExtensionNotFound:
-        logger.debug(
+        logger.warning(
             f"Authority Information Access extension not "
             f"found for {certificate.subject.__str__()}."
         )
@@ -1462,35 +1504,36 @@ class CertPath(str, Enum):
     """
 
     # Mobility operator (MO)
-    CONTRACT_LEAF_DER = "contractLeafCert.der"
-    MO_SUB_CA2_DER = "moSubCA2Cert.der"
-    MO_SUB_CA1_DER = "moSubCA1Cert.der"
-    MO_ROOT_DER = "moRootCACert.der"
+    CONTRACT_LEAF_DER = "client/mo/MO_LEAF.der"
+    MO_SUB_CA2_DER = "ca/mo/MO_SUB_CA2.der"
+    MO_SUB_CA1_DER = "ca/mo/MO_SUB_CA1.der"
+    MO_ROOT_DER = "ca/mo/MO_ROOT_CA.der"
 
     # Charge point operator (CPO)
-    SECC_LEAF_DER = "seccLeafCert.der"
-    SECC_LEAF_PEM = "seccLeafCert.pem"
-    CPO_SUB_CA2_DER = "cpoSubCA2Cert.der"
-    CPO_SUB_CA1_DER = "cpoSubCA1Cert.der"
-    V2G_ROOT_DER = "v2gRootCACert.der"
-    V2G_ROOT_PEM = "v2gRootCACert.pem"
-    # Needed for the 'certfile' parameter in ssl_context.load_cert_chain()
-    CPO_CERT_CHAIN_PEM = "cpoCertChain.pem"
+    SECC_LEAF_DER = "client/cso/SECC_LEAF.der"
+    SECC_LEAF_PEM = "client/cso/SECC_LEAF.pem"
+    CPO_SUB_CA2_DER = "ca/cso/CPO_SUB_CA2.der"
+    CPO_SUB_CA1_DER = "ca/cso/CPO_SUB_CA1.der"
+    CPO_SUB_CA1_PEM = "ca/cso/CPO_SUB_CA1.pem"
+    CPO_SUB_CA2_PEM = "ca/cso/CPO_SUB_CA2.pem"
+    V2G_ROOT_DER = "ca/v2g/V2G_ROOT_CA.der"
+    V2G_ROOT_PEM = "ca/v2g/V2G_ROOT_CA.pem"
 
     # Certificate provisioning service (CPS)
-    CPS_LEAF_DER = "cpsLeafCert.der"
-    CPS_SUB_CA2_DER = "cpsSubCA2Cert.der"
-    CPS_SUB_CA1_DER = "cpsSubCA1Cert.der"
+    CPS_LEAF_DER = "client/cps/CPS_LEAF.der"
+    CPS_SUB_CA2_DER = "ca/cps/CPS_SUB_CA2.der"
+    CPS_SUB_CA1_DER = "ca/cps/CPS_SUB_CA1.der"
     # The root is the V2G_ROOT
 
     # EV manufacturer (OEM)
-    OEM_LEAF_DER = "oemLeafCert.der"
-    OEM_SUB_CA2_DER = "oemSubCA2Cert.der"
-    OEM_SUB_CA1_DER = "oemSubCA1Cert.der"
-    OEM_ROOT_DER = "oemRootCACert.der"
-    OEM_ROOT_PEM = "oemRootCACert.pem"
-    OEM_CERT_CHAIN_PEM = "oemCertChain.pem"
+    OEM_LEAF_DER = "client/oem/OEM_LEAF.der"
+    OEM_SUB_CA2_DER = "ca/oem/OEM_SUB_CA2.der"
+    OEM_SUB_CA1_DER = "ca/oem/OEM_SUB_CA1.der"
+    OEM_ROOT_DER = "ca/oem/OEM_ROOT_CA.der"
+    OEM_ROOT_PEM = "ca/oem/OEM_ROOT_CA.pem"
+    OEM_CERT_CHAIN_PEM = "client/oem/OEM_CERT_CHAIN.pem"
 
+<<<<<<< HEAD
     def __get__(self, instance, owner):
         path = os.path.join(
             str(shared_settings[SettingKey.PKI_PATH]),
@@ -1500,6 +1543,15 @@ class CertPath(str, Enum):
         )
         logger.debug(f"Using cert path: {path}")
         return path
+=======
+    # Vehicle
+    VEHICLE_LEAF_DER = "client/vehicle/VEHICLE_LEAF.der"
+    VEHICLE_SUB_CA2_DER = "ca/vehicle/VEHICLE_SUB_CA2.der"
+    VEHICLE_SUB_CA1_DER = "ca/vehicle/VEHICLE_SUB_CA1.der"
+    VEHICLE_ROOT_DER = "ca/v2g/V2G_ROOT_CA.der"
+    VEHICLE_ROOT_PEM = "ca/v2g/V2G_ROOT_CA.pem"
+    VEHICLE_CERT_CHAIN_PEM = "client/vehicle/VEHICLE_CERT_CHAIN.pem"
+>>>>>>> everest/everest
 
 
 class KeyPath(str, Enum):
@@ -1512,29 +1564,30 @@ class KeyPath(str, Enum):
     """
 
     # Mobility operator (MO)
-    CONTRACT_LEAF_PEM = "contractLeaf.key"
-    MO_SUB_CA2_PEM = "moSubCA2.key"
-    MO_SUB_CA1_PEM = "moSubCA1.key"
-    MO_ROOT_PEM = "moRootCA.key"
+    CONTRACT_LEAF_PEM = "client/mo/MO_LEAF.key"
+    MO_SUB_CA2_PEM = "client/mo/MO_SUB_CA2.key"
+    MO_SUB_CA1_PEM = "client/mo/MO_SUB_CA1.key"
+    MO_ROOT_PEM = "client/mo/MO_ROOT_CA.key"
 
     # Charge point operator (CPO)
-    SECC_LEAF_PEM = "seccLeaf.key"
-    CPO_SUB_CA2_PEM = "cpoSubCA2.key"
-    CPO_SUB_CA1_PEM = "cpoSubCA1.key"
-    V2G_ROOT_PEM = "v2gRootCA.key"
+    SECC_LEAF_PEM = "client/cso/SECC_LEAF.key"
+    CPO_SUB_CA2_PEM = "client/cso/CPO_SUB_CA2.key"
+    CPO_SUB_CA1_PEM = "client/cso/CPO_SUB_CA1.key"
+    V2G_ROOT_PEM = "client/v2g/V2G_ROOT_CA.key"
 
     # Certificate provisioning service (CPS)
-    CPS_LEAF_PEM = "cpsLeaf.key"
-    CPS_SUB_CA2_PEM = "cpsSubCA2.key"
-    CPS_SUB_CA1_PEM = "cpsSubCA1.key"
+    CPS_LEAF_PEM = "client/cps/CPS_LEAF.key"
+    CPS_SUB_CA2_PEM = "client/cps/CPS_SUB_CA2.key"
+    CPS_SUB_CA1_PEM = "client/cps/CPS_SUB_CA1.key"
     # The root is the V2G_ROOT
 
     # EV manufacturer (OEM)
-    OEM_LEAF_PEM = "oemLeaf.key"
-    OEM_SUB_CA2_PEM = "oemSubCA2.key"
-    OEM_SUB_CA1_PEM = "oemSubCA1.key"
-    OEM_ROOT_PEM = "oemRootCA.key"
+    OEM_LEAF_PEM = "client/oem/OEM_LEAF.key"
+    OEM_SUB_CA2_PEM = "client/oem/OEM_SUB_CA2.key"
+    OEM_SUB_CA1_PEM = "client/oem/OEM_SUB_CA1.key"
+    OEM_ROOT_PEM = "client/oem/OEM_ROOT_CA.key"
 
+<<<<<<< HEAD
     def __get__(self, instance, owner):
         path = os.path.join(
             str(shared_settings[SettingKey.PKI_PATH]),
@@ -1544,6 +1597,13 @@ class KeyPath(str, Enum):
         )
         logger.debug(f"Using key path: {path}")
         return path
+=======
+    # Vehicle
+    VEHICLE_LEAF_PEM = "client/vehicle/VEHICLE_LEAF.key"
+    VEHICLE_SUB_CA2_PEM = "client/vehicle/VEHICLE_SUB_CA2.key"
+    VEHICLE_SUB_CA1_PEM = "client/vehicle/VEHICLE_SUB_CA1.key"
+    VEHICLE_ROOT_PEM = "client/v2g/V2G_ROOT_CA.key"
+>>>>>>> everest/everest
 
 
 class KeyPasswordPath(str, Enum):
@@ -1555,6 +1615,7 @@ class KeyPasswordPath(str, Enum):
     """
 
     # Private key password paths
+<<<<<<< HEAD
     SECC_LEAF_KEY_PASSWORD = "seccLeafPassword.txt"
     OEM_LEAF_KEY_PASSWORD = "oemLeafPassword.txt"
     CONTRACT_LEAF_KEY_PASSWORD = "contractLeafPassword.txt"
@@ -1570,3 +1631,11 @@ class KeyPasswordPath(str, Enum):
         )
         logger.debug(f"Using key path: {path}")
         return path
+=======
+    SECC_LEAF_KEY_PASSWORD = "client/cso/SECC_LEAF_PASSWORD.txt"
+    OEM_LEAF_KEY_PASSWORD = "client/oem/OEM_LEAF_PASSWORD.txt"
+    CONTRACT_LEAF_KEY_PASSWORD = "client/mo/MO_LEAF_PASSWORD.txt"
+    CPS_LEAF_KEY_PASSWORD = "client/cps/CPS_LEAF_PASSWORD.txt"
+    MO_SUB_CA2_PASSWORD = "client/cso/CPO_SUB_CA2_PASSWORD.txt"
+    VEHICLE_LEAF_KEY_PASSWORD = "client/vehicle/VEHICLE_LEAF_PASSWORD.txt"
+>>>>>>> everest/everest

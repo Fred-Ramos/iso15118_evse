@@ -3,13 +3,13 @@ prompt 					= no
 distinguished_name		= ca_dn
 
 [ca_dn]
-commonName				= OEMSubCA1
-organizationName		= EVerest
+commonName				= VehicleSubCA2
+organizationName		= Pionix
 countryName				= DE
 domainComponent			= OEM
 
 [ext]
-basicConstraints		= critical,CA:true,pathlen:1
+basicConstraints		= critical,CA:true,pathlen:0
 keyUsage				= critical,keyCertSign,cRLSign
 subjectKeyIdentifier	= hash
 
