@@ -143,10 +143,11 @@ def get_ssl_context(server_side: bool) -> Optional[SSLContext]:
     if server_side:
         try:
             logger.info("Getting SSL context")
+            logger.info("Loading CPO cert chain")
             ssl_context.load_cert_chain(
-                certfile=CertPath.CPO_CERT_CHAIN_PEM,
-                keyfile=KeyPath.SECC_LEAF_PEM,
-                password=load_priv_key_pass(KeyPasswordPath.SECC_LEAF_KEY_PASSWORD),
+                certfile=CertPath.CPO_CERT_CHAIN_PEM, # Full certificate chain (leaf + intermediates)
+                keyfile=KeyPath.SECC_LEAF_PEM,        # Private key file for the Leaf certificate only
+                password=load_priv_key_pass(KeyPasswordPath.SECC_LEAF_KEY_PASSWORD), # Passphrase for the private key
             )
         except SSLError:
             logger.exception(
@@ -172,11 +173,12 @@ def get_ssl_context(server_side: bool) -> Optional[SSLContext]:
 
             logger.debug("TLS 1.3 is enabled: enforcing mutual authentication by verifying EVCC certificate chain")
 
-            ssl_context.load_verify_locations(cafile=CertPath.OEM_ROOT_PEM)
+            ssl_context.load_verify_locations(cafile=CertPath.V2G_ROOT_PEM) # vehicle cert chain issued by V2GRoot
             ssl_context.verify_mode = VerifyMode.CERT_REQUIRED
         else:
             # In ISO 15118-2, we only verify the SECC's certificates
             ssl_context.verify_mode = VerifyMode.CERT_NONE
+
         # The SECC must support both ciphers defined in ISO 15118-20
         # OpenSSL 1.3 supports TLS 1.3 cipher suites by default.
         # Calling .set_ciphers to be more evident about what is available.
@@ -1462,34 +1464,42 @@ class CertPath(str, Enum):
     """
 
     # Mobility operator (MO)
-    CONTRACT_LEAF_DER = "contractLeafCert.der"
-    MO_SUB_CA2_DER = "moSubCA2Cert.der"
-    MO_SUB_CA1_DER = "moSubCA1Cert.der"
-    MO_ROOT_DER = "moRootCACert.der"
+    CONTRACT_LEAF_DER = "contractLeaf.der"
+    MO_SUB_CA2_DER = "moSubCA2.der"
+    MO_SUB_CA1_DER = "moSubCA1.der"
+    MO_ROOT_DER = "moRootCA.der"
 
     # Charge point operator (CPO)
-    SECC_LEAF_DER = "seccLeafCert.der"
-    SECC_LEAF_PEM = "seccLeafCert.pem"
-    CPO_SUB_CA2_DER = "cpoSubCA2Cert.der"
-    CPO_SUB_CA1_DER = "cpoSubCA1Cert.der"
-    V2G_ROOT_DER = "v2gRootCACert.der"
-    V2G_ROOT_PEM = "v2gRootCACert.pem"
+    SECC_LEAF_DER = "seccLeaf.der"
+    SECC_LEAF_PEM = "seccLeaf.pem"
+    CPO_SUB_CA2_DER = "cpoSubCA2.der"
+    CPO_SUB_CA1_DER = "cpoSubCA1.der"
+    V2G_ROOT_DER = "v2gRootCA.der"
+    V2G_ROOT_PEM = "v2gRootCA.pem"
     # Needed for the 'certfile' parameter in ssl_context.load_cert_chain()
     CPO_CERT_CHAIN_PEM = "cpoCertChain.pem"
 
     # Certificate provisioning service (CPS)
-    CPS_LEAF_DER = "cpsLeafCert.der"
-    CPS_SUB_CA2_DER = "cpsSubCA2Cert.der"
-    CPS_SUB_CA1_DER = "cpsSubCA1Cert.der"
+    CPS_LEAF_DER = "cpsLeaf.der"
+    CPS_SUB_CA2_DER = "cpsSubCA2.der"
+    CPS_SUB_CA1_DER = "cpsSubCA1.der"
     # The root is the V2G_ROOT
 
     # EV manufacturer (OEM)
-    OEM_LEAF_DER = "oemLeafCert.der"
-    OEM_SUB_CA2_DER = "oemSubCA2Cert.der"
-    OEM_SUB_CA1_DER = "oemSubCA1Cert.der"
-    OEM_ROOT_DER = "oemRootCACert.der"
-    OEM_ROOT_PEM = "oemRootCACert.pem"
+    OEM_LEAF_DER = "oemLeaf.der"
+    OEM_SUB_CA2_DER = "oemSubCA2.der"
+    OEM_SUB_CA1_DER = "oemSubCA1.der"
+    OEM_ROOT_DER = "oemRootCA.der"
+    OEM_ROOT_PEM = "oemRootCA.pem"
     OEM_CERT_CHAIN_PEM = "oemCertChain.pem"
+
+    # Vehicle
+    VEHICLE_LEAF_PEM="vehicleLeaf.pem"
+    VEHICLE_SUB_CA2_PEM="vehicleSubCA2.pem"
+    VEHICLE_SUB_CA1_PEM="vehicleSubCA1.pem"
+    # The root is the V2G_ROOT
+    # Needed for mutual authentication in TLS1.3
+    VEHICLE_CERT_CHAIN_PEM="vehicleCertChain.pem"
 
     def __get__(self, instance, owner):
         path = os.path.join(
@@ -1535,6 +1545,12 @@ class KeyPath(str, Enum):
     OEM_SUB_CA1_PEM = "oemSubCA1.key"
     OEM_ROOT_PEM = "oemRootCA.key"
 
+    # Vehicle 
+    VEHICLE_LEAF_PEM = "vehicleLeaf.key"
+    VEHICLE_SUB_CA2_PEM = "vehicleSubCA2.key"
+    VEHICLE_SUB_CA1_PEM = "vehicleSubCA1.key"
+    # The root is the V2G_ROOT
+
     def __get__(self, instance, owner):
         path = os.path.join(
             str(shared_settings[SettingKey.PKI_PATH]),
@@ -1560,6 +1576,7 @@ class KeyPasswordPath(str, Enum):
     CONTRACT_LEAF_KEY_PASSWORD = "contractLeafPassword.txt"
     CPS_LEAF_KEY_PASSWORD = "cpsLeafPassword.txt"
     MO_SUB_CA2_PASSWORD = "moSubCA2LeafPassword.txt"
+    VEHICLE_LEAF_KEY_PASSWORD = "vehicleLeafPassword.txt"
 
     def __get__(self, instance, owner):
         path = os.path.join(

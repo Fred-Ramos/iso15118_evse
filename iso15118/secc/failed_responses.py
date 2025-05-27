@@ -203,10 +203,9 @@ from iso15118.shared.messages.iso15118_20.ac import (
 )
 from iso15118.shared.messages.iso15118_20.common_messages import (
     AuthorizationReq as AuthorizationReqV20,
-)
-from iso15118.shared.messages.iso15118_20.common_messages import (
     AuthorizationRes as AuthorizationResV20,
 )
+
 from iso15118.shared.messages.iso15118_20.common_messages import (
     AuthorizationSetupReq,
     AuthorizationSetupRes,
