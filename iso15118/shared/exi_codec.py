@@ -369,9 +369,7 @@ class EXI:
                     )
                     raise EXIDecodingError(f"Unable to decode {msg_name}")
 
-                logger.warning("PARSING OBJECT")
                 result = msg_class.parse_obj(msg_dict)
-                logger.warning("DEBUG: OBJECT PARSED")
                 return result
 
             raise EXIDecodingError("Can't identify protocol to use for decoding")
