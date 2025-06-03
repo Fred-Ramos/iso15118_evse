@@ -276,6 +276,18 @@ class CommunicationSessionHandler:
                 notification = await queue.get()
 
             try:
+
+                # INESCTEC setup timer task
+                status = await self.evse_controller.get_comm_status()
+                if status == False:
+                    if self.tcp_server_handler:
+                        # [V2G2-034] The SECC shall terminate the TLS or TCP connection after stopping the V2G Communication Session.
+                        try:
+                            logger.debug("Making sure existing tcp server handler is terminated duo to communication problem")
+                            await cancel_task(self.tcp_server_handler)
+                        except Exception as e:
+                            logger.warning(f"Error cancelling existing tcp server handler: {e}")
+
                 if isinstance(notification, UDPPacketNotification):
                     await self.process_incoming_udp_packet(notification)
                 elif isinstance(notification, TCPClientNotification):
@@ -435,7 +447,26 @@ class CommunicationSessionHandler:
                 try:
                     sdp_request = SDPRequest.from_payload(v2gtp_msg.payload)
                     logger.info(f"SDPRequest received: {sdp_request}")
-                    sdp_response = await self.process_sdp_request(sdp_request)
+
+
+
+
+                    # INESCTEC setup timer task
+                    try:
+                        logger.warning("SETTING COMM STATUS")
+                        await self.evse_controller.set_comm_status(status=True)
+                        logger.warning("AFTER SETTING COMM STATUS")
+                    except Exception as e:
+                        logger.error(f"setting comm_status exception: {e}")
+
+
+
+
+
+
+
+
+                    sdp_response = await self.process_sdp_request(sdp_request) 
                 except InvalidSDPRequestError as exc:
                     logger.exception(
                         f"{exc.__class__.__name__}, received bytes: "
