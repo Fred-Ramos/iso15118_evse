@@ -447,25 +447,11 @@ class CommunicationSessionHandler:
                 try:
                     sdp_request = SDPRequest.from_payload(v2gtp_msg.payload)
                     logger.info(f"SDPRequest received: {sdp_request}")
-
-
-
-
                     # INESCTEC setup timer task
                     try:
-                        logger.warning("SETTING COMM STATUS")
                         await self.evse_controller.set_comm_status(status=True)
-                        logger.warning("AFTER SETTING COMM STATUS")
                     except Exception as e:
                         logger.error(f"setting comm_status exception: {e}")
-
-
-
-
-
-
-
-
                     sdp_response = await self.process_sdp_request(sdp_request) 
                 except InvalidSDPRequestError as exc:
                     logger.exception(
