@@ -1270,7 +1270,6 @@ class Authorization(StateSECC):
             # in message ServicePaymentSelectReq and no positive EIM information
             # is available an SECC shall set the parameter EVSEProcessing to
             # „Ongoing_WaitingForCustomerInteraction“ in AuthorizationRes.
-            logger.debug("DEBUG1 CARALHO")
             if self.comm_session.selected_auth_option == AuthEnum.EIM_V2:
                 auth_status = EVSEProcessing.ONGOING_WAITING_FOR_CUSTOMER
 
