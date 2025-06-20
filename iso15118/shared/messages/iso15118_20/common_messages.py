@@ -892,7 +892,7 @@ class ScheduledEVPowerProfile(BaseModel):
 
     selected_schedule_tuple_id: NumericID = Field(..., alias="SelectedScheduleTupleID")
     power_tolerance_acceptance: PowerToleranceAcceptance = Field(
-        ..., alias="PowerToleranceAcceptance"
+        None, alias="PowerToleranceAcceptance" # Only mandatory if a Power_tolerance was sent in the latest scheduleexchangeRes (Table 106 ISO 15118-20)
     )
 
 
