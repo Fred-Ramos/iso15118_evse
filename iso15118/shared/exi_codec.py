@@ -368,10 +368,12 @@ class EXI:
                         f"name {msg_name}"
                     )
                     raise EXIDecodingError(f"Unable to decode {msg_name}")
-
-                result = msg_class.parse_obj(msg_dict)
+                
+                try:
+                    result = msg_class.parse_obj(msg_dict)
+                except ValidationError as exc:
+                    logger.error(f"Pydantic ValidationError for msg_class {msg_class}: {exc}")
                 return result
-
             raise EXIDecodingError("Can't identify protocol to use for decoding")
         except ValidationError as exc:
             msg_type: Optional[
